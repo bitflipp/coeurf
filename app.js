@@ -688,7 +688,12 @@ function renderHandles() {
   handlesLayer.innerHTML = html;
 }
 
-function render() {
+// Split out from render() so a color input's live preview (fired continuously
+// while dragging inside the native picker) can repaint the canvas without
+// touching the panel: replacing the panel's innerHTML mid-drag would tear out
+// the very <input type="color"> the OS picker is attached to and cut the drag
+// short.
+function renderCanvas() {
   const { width: W, height: H } = state.grid;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("width", W);
@@ -705,6 +710,10 @@ function render() {
   selectionLayer.innerHTML = selectionOverlayMarkup(facesCache.curvesById || {});
 
   renderHandles();
+}
+
+function render() {
+  renderCanvas();
   renderPanel();
 }
 
@@ -759,7 +768,8 @@ function renderCurvePanel() {
     </div>
   `;
   document.getElementById("f-color").addEventListener("input", e => {
-    c.color = e.target.value; render();
+    c.color = e.target.value;
+    renderCanvas();
   });
   document.getElementById("f-color").addEventListener("change", () => pushHistory());
   const widthInput = document.getElementById("f-width");
@@ -822,7 +832,8 @@ function renderFacePanel() {
       </div>
     `;
     document.getElementById("f-scolor").addEventListener("input", e => {
-      s.color = e.target.value; render();
+      s.color = e.target.value;
+      renderCanvas();
     });
     document.getElementById("f-scolor").addEventListener("change", () => pushHistory());
   }
@@ -847,12 +858,18 @@ function renderFacePanel() {
     `;
     const updatePreview = () => {
       const el = document.getElementById("f-gpreview");
-      el.style.background = `linear-gradient(${s.angle}deg, ${s.color1}, ${s.color2})`;
+      el.style.background = `linear-gradient(${s.angle}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
     };
     updatePreview();
-    document.getElementById("f-g1").addEventListener("input", e => { s.color1 = e.target.value; updatePreview(); render(); });
+    document.getElementById("f-g1").addEventListener("input", e => {
+      s.color1 = e.target.value;
+      updatePreview(); renderCanvas();
+    });
     document.getElementById("f-g1").addEventListener("change", () => pushHistory());
-    document.getElementById("f-g2").addEventListener("input", e => { s.color2 = e.target.value; updatePreview(); render(); });
+    document.getElementById("f-g2").addEventListener("input", e => {
+      s.color2 = e.target.value;
+      updatePreview(); renderCanvas();
+    });
     document.getElementById("f-g2").addEventListener("change", () => pushHistory());
     const angleInput = document.getElementById("f-gangle");
     angleInput.addEventListener("input", e => {
