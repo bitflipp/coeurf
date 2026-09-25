@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cœurf — bezier grid editor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>✳️</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="toolbar">
+  <div class="brand">cœurf</div>
+
+  <div class="tool-group" role="group" aria-label="Tools">
+    <button id="tool-select" class="tool-btn active" data-tool="select" title="Select &amp; edit (V)">Select</button>
+    <button id="tool-draw" class="tool-btn" data-tool="draw" title="Draw curve (C)">Draw Curve</button>
+  </div>
+
+  <div class="tool-group grid-settings">
+    <label>W<input id="grid-width" type="number" min="20" step="1" value="800"></label>
+    <label>H<input id="grid-height" type="number" min="20" step="1" value="600"></label>
+    <label>Res<input id="grid-res" type="number" min="2" step="1" value="20"></label>
+    <label>Border<input id="border-color" type="color" value="#33363d"></label>
+    <label>W<input id="border-width" type="number" min="0" step="0.5" value="2" style="width:3.2em"></label>
+    <button id="apply-grid">Apply</button>
+  </div>
+
+  <div class="tool-group">
+    <button id="undo-btn" title="Undo (Ctrl+Z)">&#8630;</button>
+    <button id="redo-btn" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+  </div>
+
+  <div class="tool-group">
+    <button id="save-btn" title="Save to this browser (Ctrl+S)">Save</button>
+    <button id="load-btn" title="Load from this browser (Ctrl+O)">Load</button>
+  </div>
+
+  <div class="tool-group">
+    <label class="check"><input type="checkbox" id="toggle-grid" checked> grid</label>
+    <button id="export-btn">Export SVG</button>
+  </div>
+</header>
+
+<main id="workspace">
+  <div id="canvas-scroll">
+    <svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg>
+  </div>
+  <aside id="panel">
+    <div class="panel-empty">Nothing selected.<br>Draw a curve, or click inside a region to select the surface.</div>
+  </aside>
+</main>
+
+<div id="hint">Draw Curve: click a grid point to start, click another to finish. Click an existing endpoint to connect and close loops.</div>
+
+<script src="app.js"></script>
+</body>
+</html>
