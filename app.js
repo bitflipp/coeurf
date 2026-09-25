@@ -95,6 +95,117 @@ function snapToGrid(x, y, res, w, h) {
 function vkey(p) { return `${Math.round(p.x * 100)},${Math.round(p.y * 100)}`; }
 
 /* ---------------------------------------------------------------------- */
+/* Self/mutual curve-intersection splitting                                */
+/*                                                                          */
+/* Face detection below only joins curves at shared endpoints (p0/p3): a   */
+/* curve that loops back and crosses itself mid-span, or two curves that   */
+/* cross without sharing an endpoint, are geometrically two-or-more        */
+/* surfaces but topologically invisible to that algorithm. To make those   */
+/* crossings count as real graph vertices, every curve is pre-split at any */
+/* point where its flattened polyline crosses another curve's (or its own) */
+/* polyline away from an existing shared endpoint. The split only feeds    */
+/* face detection - state.curves (drawing, editing, undo) is untouched.    */
+/* ---------------------------------------------------------------------- */
+
+function cubicSplitAt(p0, c1, c2, p3, t) {
+  const p01 = { x: lerp(p0.x, c1.x, t), y: lerp(p0.y, c1.y, t) };
+  const p12 = { x: lerp(c1.x, c2.x, t), y: lerp(c1.y, c2.y, t) };
+  const p23 = { x: lerp(c2.x, p3.x, t), y: lerp(c2.y, p3.y, t) };
+  const p012 = { x: lerp(p01.x, p12.x, t), y: lerp(p01.y, p12.y, t) };
+  const p123 = { x: lerp(p12.x, p23.x, t), y: lerp(p12.y, p23.y, t) };
+  const p0123 = { x: lerp(p012.x, p123.x, t), y: lerp(p012.y, p123.y, t) };
+  return {
+    left: { p0, c1: p01, c2: p012, p3: p0123 },
+    right: { p0: p0123, c1: p123, c2: p23, p3 },
+  };
+}
+
+// Intersection of segments p1->p2 and p3->p4, INCLUSIVE of their endpoints:
+// on a grid-snapped shape a real crossing very often lands exactly on a
+// flattened-polyline sample boundary (e.g. two straight diagonals of a square
+// meeting dead center on a 20-segment flattening), so excluding segment
+// endpoints here would miss it. Touches at a curve's *own* p0/p3 are instead
+// filtered by the caller, using the curve's global t (EPS_T below) - that is
+// robust regardless of which segment happened to catch the crossing.
+function segmentIntersection(p1, p2, p3, p4) {
+  const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null;
+  const ex = p3.x - p1.x, ey = p3.y - p1.y;
+  const t = (ex * d2y - ey * d2x) / denom;
+  const u = (ex * d1y - ey * d1x) / denom;
+  const EPS = 1e-9;
+  if (t < -EPS || t > 1 + EPS || u < -EPS || u > 1 + EPS) return null;
+  return { t, u, point: { x: p1.x + t * d1x, y: p1.y + t * d1y } };
+}
+
+// Splits one curve into consecutive sub-curves at the given sorted, distinct
+// breakpoints ({t, point}), forcing each new shared anchor to the exact same
+// coordinate on both sides so face detection's vkey union recognizes it as
+// one graph vertex (a linear split-point estimate would otherwise leave the
+// two sides a fraction of a unit apart).
+function splitCurveAtParams(curve, breaks) {
+  if (breaks.length === 0) return [curve];
+  const pieces = [];
+  let remaining = { p0: curve.p0, c1: curve.c1, c2: curve.c2, p3: curve.p3 };
+  let tPrev = 0;
+  for (const brk of breaks) {
+    const tLocal = (brk.t - tPrev) / (1 - tPrev);
+    const { left, right } = cubicSplitAt(remaining.p0, remaining.c1, remaining.c2, remaining.p3, tLocal);
+    left.p3 = brk.point;
+    right.p0 = brk.point;
+    pieces.push(left);
+    remaining = right;
+    tPrev = brk.t;
+  }
+  pieces.push(remaining);
+  return pieces.map((p, i) => ({ ...curve, id: `${curve.id}~${i}`, p0: p.p0, c1: p.c1, c2: p.c2, p3: p.p3 }));
+}
+
+function splitCurvesAtIntersections(curves) {
+  const N = FLATTEN_SEGMENTS;
+  const EPS_T = 1e-4;   // global-t margin excluded near each curve's own endpoints
+  const EPS_MERGE = 1e-3; // global-t margin for merging near-duplicate breakpoints
+
+  const flats = curves.map(c => flattenCubic(c.p0, c.c1, c.c2, c.p3, N));
+  const breaksByCurve = curves.map(() => []);
+
+  for (let a = 0; a < curves.length; a++) {
+    for (let b = a; b < curves.length; b++) {
+      const flatA = flats[a], flatB = flats[b];
+      for (let i = 0; i < flatA.length - 1; i++) {
+        const jStart = (a === b) ? i + 2 : 0;
+        for (let j = jStart; j < flatB.length - 1; j++) {
+          const hit = segmentIntersection(flatA[i], flatA[i + 1], flatB[j], flatB[j + 1]);
+          if (!hit) continue;
+          const tA = (i + hit.t) / N;
+          const tB = (j + hit.u) / N;
+          if (tA < EPS_T || tA > 1 - EPS_T) continue;
+          if (tB < EPS_T || tB > 1 - EPS_T) continue;
+          breaksByCurve[a].push({ t: tA, point: hit.point });
+          breaksByCurve[b].push({ t: tB, point: hit.point });
+        }
+      }
+    }
+  }
+
+  const result = [];
+  for (let idx = 0; idx < curves.length; idx++) {
+    const raw = breaksByCurve[idx];
+    if (raw.length === 0) { result.push(curves[idx]); continue; }
+    raw.sort((p, q) => p.t - q.t);
+    const merged = [];
+    for (const brk of raw) {
+      if (merged.length && brk.t - merged[merged.length - 1].t < EPS_MERGE) continue;
+      merged.push(brk);
+    }
+    result.push(...splitCurveAtParams(curves[idx], merged));
+  }
+  return result;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Application state                                                       */
 /* ---------------------------------------------------------------------- */
 
@@ -385,7 +496,8 @@ function fmt(n) { return Math.round(n * 100) / 100; }
 
 function recomputeFaces() {
   const prevFaces = facesCache;
-  const { faces, curvesById } = buildFaces(state.curves.concat(computeBorderSegments()));
+  const rawCurves = state.curves.concat(computeBorderSegments());
+  const { faces, curvesById } = buildFaces(splitCurvesAtIntersections(rawCurves));
 
   for (const face of faces) {
     if (state.faceStyles[face.signature]) continue;
@@ -1074,8 +1186,8 @@ function init() {
 // test harness, inspect and drive internal state directly.
 if (typeof window !== "undefined") {
   window.__coeurf = {
-    state, computeBorderSegments, buildFaces, recomputeFaces, getFaces: () => facesCache,
-    undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
+    state, computeBorderSegments, buildFaces, splitCurvesAtIntersections, recomputeFaces, getFaces: () => facesCache,
+    interiorSamplePoint, undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
   };
 }
 
