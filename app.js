@@ -509,7 +509,17 @@ function curvesMarkup(curves) {
 }
 
 // Selected-face highlight: drawn in its own layer above the curve strokes so
-// it can never be hidden underneath the very curves that bound the face.
+// it can never be hidden underneath the very curves that bound the face. No
+// flat fill/stroke color can be relied on to contrast an arbitrary
+// user-chosen fill, so this doesn't try to pick one: classic two-tone
+// marching ants, black and white dashes alternating and animated together.
+// (An earlier version used a single white stroke with
+// mix-blend-mode:difference to invert whatever's underneath, same trick
+// renderGrid uses below - but the grid layer *also* difference-blends white
+// over the canvas, and invert(invert(x)) === x, so wherever this editor's
+// grid-snapped curves sit on a grid line - i.e. almost always - the two
+// inversions exactly cancelled and the ants vanished. Two fixed, non-blended
+// colors sidesteps that.)
 function selectionOverlayMarkup(curvesById) {
   if (!state.selection || state.selection.type !== "face") return "";
   const face = facesCache.find(f => f.signature === state.selection.signature);
@@ -517,7 +527,13 @@ function selectionOverlayMarkup(curvesById) {
   const d = cubicPathFromCycle(face.cycle, curvesById) + " " +
     face.holes.map(h => cubicPathFromCycle(h.cycle, curvesById)).join(" ");
   const s = currentScale();
-  return `<path d="${d}" fill="#5b8cff" fill-opacity="0.32" fill-rule="evenodd" stroke="#5b8cff" stroke-width="${3 / s}"></path>`;
+  const dash = 8 / s, w = 2 / s;
+  return `<path d="${d}" fill="none" stroke="#000000" stroke-width="${w}" stroke-dasharray="${dash},${dash}">` +
+    `<animate attributeName="stroke-dashoffset" from="${dash * 2}" to="0" dur="0.5s" repeatCount="indefinite"/>` +
+    `</path>` +
+    `<path d="${d}" fill="none" stroke="#ffffff" stroke-width="${w}" stroke-dasharray="${dash},${dash}" stroke-dashoffset="${dash}">` +
+    `<animate attributeName="stroke-dashoffset" from="${dash * 3}" to="${dash}" dur="0.5s" repeatCount="indefinite"/>` +
+    `</path>`;
 }
 
 function currentScale() {
