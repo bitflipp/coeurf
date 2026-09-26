@@ -95,6 +95,8 @@ test("clicking each lobe of a self-intersecting surface selects a different, ind
   const faces = await page.evaluate(() => window.__coeurf.getFaces().map((f) => f.signature));
   expect(faces.length).toBe(3);
 
+  await page.click("#tool-surface");
+
   // interiorSamplePoint just guarantees "inside the polygon", which for the
   // thin sliver face lands within the curve's own hit-test tolerance (curve
   // hit-testing wins over face hit-testing by design). Hand-picked points,

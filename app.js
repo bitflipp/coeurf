@@ -214,7 +214,7 @@ const state = {
   curves: [],        // {id, isBorder, p0,c1,c2,p3, width, color}
   faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
   selection: null,    // {type:'curve', id} | {type:'face', signature}
-  tool: "select",
+  tool: "curve",      // "page" | "curve" | "surface"
   curveIdCounter: 1,
 };
 
@@ -247,7 +247,6 @@ function restoreFromSnapshot(snap) {
   state.faceStyles = JSON.parse(JSON.stringify(snap.faceStyles));
   state.curveIdCounter = snap.curveIdCounter;
   state.selection = null;
-  syncGridInputs();
   recomputeFaces();
   render();
 }
@@ -724,8 +723,12 @@ function render() {
 const panel = document.getElementById("panel");
 
 function renderPanel() {
+  if (state.tool === "page") { renderPagePanel(); return; }
   if (!state.selection) {
-    panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Draw a curve, or click inside a region to select the surface.</div>`;
+    const msg = state.tool === "surface"
+      ? "Nothing selected.<br>Click inside a region to select its surface."
+      : "Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.";
+    panel.innerHTML = `<div class="panel-empty">${msg}</div>`;
     return;
   }
   if (state.selection.type === "curve") {
@@ -733,6 +736,34 @@ function renderPanel() {
   } else {
     renderFacePanel();
   }
+}
+
+function renderPagePanel() {
+  const g = state.grid;
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Page</h3>
+      <div class="field-row"><label>Width</label><input type="number" min="20" step="1" id="p-width" value="${g.width}"></div>
+      <div class="field-row"><label>Height</label><input type="number" min="20" step="1" id="p-height" value="${g.height}"></div>
+      <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="p-res" value="${g.resolution}"></div>
+      <div class="field-row"><label>Border color</label><input type="color" id="p-bcolor" value="${g.borderColor}"></div>
+      <div class="field-row"><label>Border width</label><input type="number" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"></div>
+      <button class="block-btn" id="p-apply">Apply</button>
+    </div>
+  `;
+  document.getElementById("p-apply").addEventListener("click", () => {
+    const w = Math.max(20, parseInt(document.getElementById("p-width").value, 10) || state.grid.width);
+    const h = Math.max(20, parseInt(document.getElementById("p-height").value, 10) || state.grid.height);
+    const res = Math.max(2, parseInt(document.getElementById("p-res").value, 10) || state.grid.resolution);
+    state.grid.width = w;
+    state.grid.height = h;
+    state.grid.resolution = res;
+    state.grid.borderColor = document.getElementById("p-bcolor").value;
+    state.grid.borderWidth = parseFloat(document.getElementById("p-bwidth").value) || 0;
+    recomputeFaces();
+    render();
+    pushHistory();
+  });
 }
 
 function renderCurvePanel() {
@@ -994,27 +1025,36 @@ function mirrorCurve(c) {
 function onStageMouseDown(evt) {
   if (evt.button !== 0) return;
 
-  if (state.tool === "draw") {
-    const p = snapForDrawing(evt);
-    if (!drawPending) {
-      drawPending = p;
-      showHint("Click another grid point to finish the curve. Esc to cancel.", true);
+  if (state.tool === "page") return;
+
+  if (state.tool === "surface") {
+    const pt = toSvgPoint(evt);
+    const faceHit = hitTestFace(pt);
+    if (faceHit) {
+      setSelection({ type: "face", signature: faceHit.signature });
     } else {
-      const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
-      const id = "c" + (state.curveIdCounter++);
-      const curve = { id, isBorder: false, p0: { ...drawPending }, c1, c2, p3: { ...p }, width: 3, color: "#2a2d34" };
-      state.curves.push(curve);
-      drawPending = null;
-      hideHint();
-      setTool("select");
-      recomputeFaces();
-      setSelection({ type: "curve", id });
-      pushHistory();
+      setSelection(null);
     }
     return;
   }
 
-  // select tool
+  // curve tool: selecting/dragging existing curves takes priority over
+  // starting a new one, except while a draw is already in progress, where
+  // the click always finishes/connects it (never reinterpreted as a select).
+  if (drawPending) {
+    const p = snapForDrawing(evt);
+    const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
+    const id = "c" + (state.curveIdCounter++);
+    const curve = { id, isBorder: false, p0: { ...drawPending }, c1, c2, p3: { ...p }, width: 3, color: "#2a2d34" };
+    state.curves.push(curve);
+    drawPending = null;
+    hideHint();
+    recomputeFaces();
+    setSelection({ type: "curve", id });
+    pushHistory();
+    return;
+  }
+
   const handleHit = hitTestHandle(evt);
   if (handleHit) {
     dragCtx = { kind: "handle", curve: handleHit.curve, key: handleHit.key };
@@ -1026,6 +1066,7 @@ function onStageMouseDown(evt) {
   const pt = toSvgPoint(evt);
   const curveHit = hitTestCurve(pt);
   if (curveHit) {
+    hideHint();
     setSelection({ type: "curve", id: curveHit.id });
     dragCtx = {
       kind: "curve",
@@ -1039,12 +1080,11 @@ function onStageMouseDown(evt) {
     window.addEventListener("mouseup", onWindowMouseUp);
     return;
   }
-  const faceHit = hitTestFace(pt);
-  if (faceHit) {
-    setSelection({ type: "face", signature: faceHit.signature });
-    return;
-  }
-  setSelection(null);
+
+  // empty grid point: start a new curve
+  const p = snapForDrawing(evt);
+  drawPending = p;
+  showHint("Click another grid point to finish the curve. Esc to cancel.", true);
 }
 
 function onWindowMouseMove(evt) {
@@ -1085,7 +1125,7 @@ function onWindowMouseUp() {
   dragCtx = null;
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
-  if (state.tool === "select") svg.style.cursor = "default";
+  if (state.tool === "curve") svg.style.cursor = "default";
   if (wasNoOpCurveDrag) return;
   recomputeFaces();
   render();
@@ -1093,10 +1133,12 @@ function onWindowMouseUp() {
 }
 
 function onStageMouseMove(evt) {
-  if (state.tool === "select" && !dragCtx) {
-    svg.style.cursor = hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt)) ? "grab" : "default";
+  if (state.tool === "curve" && !dragCtx && !drawPending) {
+    svg.style.cursor = hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt)) ? "grab" : "crosshair";
+  } else if (state.tool === "surface" && !dragCtx) {
+    svg.style.cursor = hitTestFace(toSvgPoint(evt)) ? "pointer" : "default";
   }
-  if (state.tool !== "draw" || !drawPending) return;
+  if (state.tool !== "curve" || !drawPending) return;
   const p = snapForDrawing(evt);
   const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
   const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
@@ -1109,32 +1151,40 @@ function onStageMouseMove(evt) {
 function setTool(tool) {
   state.tool = tool;
   drawPending = null;
+  state.selection = null;
   hideHint();
-  document.getElementById("tool-select").classList.toggle("active", tool === "select");
-  document.getElementById("tool-draw").classList.toggle("active", tool === "draw");
-  svg.style.cursor = tool === "draw" ? "crosshair" : "default";
-  if (tool === "draw") showHint("Click a grid point to start a curve.", true);
-  else hideHint();
-  renderHandles();
+  document.getElementById("tool-page").classList.toggle("active", tool === "page");
+  document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
+  document.getElementById("tool-surface").classList.toggle("active", tool === "surface");
+  svg.style.cursor = "default";
+  if (tool === "curve") {
+    showHint("Click an existing curve to select it, or an empty grid point to draw a new one.", true);
+  } else if (tool === "surface") {
+    showHint("Click inside a region to select its surface.", true);
+  }
+  render();
 }
 
-document.getElementById("tool-select").addEventListener("click", () => setTool("select"));
-document.getElementById("tool-draw").addEventListener("click", () => setTool("draw"));
+document.getElementById("tool-page").addEventListener("click", () => setTool("page"));
+document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
+document.getElementById("tool-surface").addEventListener("click", () => setTool("surface"));
 
 document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
     if (drawPending) { drawPending = null; hideHint(); renderHandles(); }
-    else setTool("select");
+    else if (state.selection) { state.selection = null; render(); }
   } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection && state.selection.type === "curve") {
     if (document.activeElement && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
     const id = state.selection.id;
     state.curves = state.curves.filter(cv => cv.id !== id);
     state.selection = null;
     recomputeFaces(); render(); pushHistory();
-  } else if (evt.key.toLowerCase() === "v" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
-    setTool("select");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
-    setTool("draw");
+    setTool("curve");
+  } else if (evt.key.toLowerCase() === "s" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("surface");
+  } else if (evt.key.toLowerCase() === "p" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("page");
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") {
     evt.preventDefault();
     if (evt.shiftKey) redo(); else undo();
@@ -1155,32 +1205,6 @@ function isTyping(evt) {
 
 svg.addEventListener("mousedown", onStageMouseDown);
 svg.addEventListener("mousemove", onStageMouseMove);
-
-/* ---------------------------------------------------------------------- */
-/* Grid settings                                                           */
-/* ---------------------------------------------------------------------- */
-
-function syncGridInputs() {
-  document.getElementById("grid-width").value = state.grid.width;
-  document.getElementById("grid-height").value = state.grid.height;
-  document.getElementById("grid-res").value = state.grid.resolution;
-  document.getElementById("border-color").value = state.grid.borderColor;
-  document.getElementById("border-width").value = state.grid.borderWidth;
-}
-
-document.getElementById("apply-grid").addEventListener("click", () => {
-  const w = Math.max(20, parseInt(document.getElementById("grid-width").value, 10) || state.grid.width);
-  const h = Math.max(20, parseInt(document.getElementById("grid-height").value, 10) || state.grid.height);
-  const res = Math.max(2, parseInt(document.getElementById("grid-res").value, 10) || state.grid.resolution);
-  state.grid.width = w;
-  state.grid.height = h;
-  state.grid.resolution = res;
-  state.grid.borderColor = document.getElementById("border-color").value;
-  state.grid.borderWidth = parseFloat(document.getElementById("border-width").value) || 0;
-  recomputeFaces();
-  render();
-  pushHistory();
-});
 
 document.getElementById("toggle-grid").addEventListener("change", render);
 document.getElementById("undo-btn").addEventListener("click", undo);
@@ -1224,10 +1248,8 @@ document.getElementById("export-btn").addEventListener("click", () => {
 function init() {
   ensureLayers();
   recomputeFaces();
-  syncGridInputs();
-  render();
   pushHistory();
-  setTool("select");
+  setTool("curve");
   window.addEventListener("resize", render);
 }
 
