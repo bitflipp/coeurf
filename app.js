@@ -542,13 +542,13 @@ function interiorSamplePoint(face) {
 /* ---------------------------------------------------------------------- */
 
 const svg = document.getElementById("stage");
-let gridLayer, facesLayer, curvesLayer, selectionLayer, handlesLayer, defsLayer;
+let gridLayer, facesLayer, curvesLayer, selectionLayer, handlesLayer, previewLayer, defsLayer;
 
 // Stacking order matters: fills, then curve strokes, then the grid (on top so
 // toggling it is actually visible over any fill/curve instead of being buried
 // under the opaque face fills), then the selection highlight (always above
 // the curves that bound a face, so it can't be hidden underneath them), then
-// the draggable handles on top of everything.
+// the draggable handles, then the hover-only draw preview on top of all of it.
 function ensureLayers() {
   svg.innerHTML = "";
   defsLayer = document.createElementNS(SVGNS, "defs");
@@ -564,12 +564,16 @@ function ensureLayers() {
   selectionLayer.style.pointerEvents = "none";
   handlesLayer = document.createElementNS(SVGNS, "g");
   handlesLayer.setAttribute("id", "layer-handles");
+  previewLayer = document.createElementNS(SVGNS, "g");
+  previewLayer.setAttribute("id", "layer-preview");
+  previewLayer.style.pointerEvents = "none";
   svg.appendChild(defsLayer);
   svg.appendChild(facesLayer);
   svg.appendChild(curvesLayer);
   svg.appendChild(gridLayer);
   svg.appendChild(selectionLayer);
   svg.appendChild(handlesLayer);
+  svg.appendChild(previewLayer);
 }
 
 function gradientId(sig) {
@@ -802,7 +806,7 @@ function renderCurvePanel() {
       <div class="field-row">
         <label>Width</label>
         <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
-        <span class="num-out">${c.width}px</span>
+        <input type="number" class="num-in" id="f-width-num" min="0.5" max="30" step="0.5" value="${c.width}">
       </div>
       <button class="block-btn" id="f-mirror">Mirror copy</button>
       <button class="danger-btn" id="f-delete">Delete curve</button>
@@ -813,13 +817,32 @@ function renderCurvePanel() {
     renderCanvas();
   });
   document.getElementById("f-color").addEventListener("change", () => pushHistory());
+  // Live 'input' updates only repaint the canvas, never the panel: rebuilding
+  // this input's own DOM node mid-drag/mid-keystroke would drop the browser's
+  // focus/pointer-capture on it, stalling the drag or losing keystrokes.
   const widthInput = document.getElementById("f-width");
+  const widthNum = document.getElementById("f-width-num");
   widthInput.addEventListener("input", e => {
     c.width = parseFloat(e.target.value);
-    widthInput.nextElementSibling.textContent = c.width + "px";
-    render();
+    widthNum.value = c.width;
+    renderCanvas();
   });
   widthInput.addEventListener("change", () => pushHistory());
+  widthNum.addEventListener("input", e => {
+    const v = parseFloat(e.target.value);
+    if (!Number.isFinite(v)) return;
+    c.width = v;
+    widthInput.value = v;
+    renderCanvas();
+  });
+  widthNum.addEventListener("change", e => {
+    const v = Math.max(0.5, Math.min(30, parseFloat(e.target.value) || c.width));
+    c.width = v;
+    e.target.value = v;
+    widthInput.value = v;
+    renderCanvas();
+    pushHistory();
+  });
 
   document.getElementById("f-mirror").addEventListener("click", () => {
     const mirrored = mirrorCurve(c);
@@ -885,7 +908,8 @@ function renderFacePanel() {
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-gangle" min="0" max="359" step="1" value="${s.angle}">
-        <span class="num-out">${s.angle}&deg;</span>
+        <input type="number" class="num-in" id="f-gangle-num" min="0" max="359" step="1" value="${s.angle}">
+        <span class="unit">&deg;</span>
       </div>
     `;
     const updatePreview = () => {
@@ -903,13 +927,31 @@ function renderFacePanel() {
       updatePreview(); renderCanvas();
     });
     document.getElementById("f-g2").addEventListener("change", () => pushHistory());
+    // Same live-update/panel-decoupling as the width gauge above: only
+    // renderCanvas(), never a full render(), while the value is still changing.
     const angleInput = document.getElementById("f-gangle");
+    const angleNum = document.getElementById("f-gangle-num");
     angleInput.addEventListener("input", e => {
       s.angle = parseInt(e.target.value, 10);
-      angleInput.nextElementSibling.innerHTML = s.angle + "&deg;";
-      updatePreview(); render();
+      angleNum.value = s.angle;
+      updatePreview(); renderCanvas();
     });
     angleInput.addEventListener("change", () => pushHistory());
+    angleNum.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      if (!Number.isFinite(v)) return;
+      s.angle = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+    });
+    angleNum.addEventListener("change", e => {
+      const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
+      s.angle = v;
+      e.target.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
+    });
   }
 
   if (isGrad) paintGradient(); else paintSolid();
@@ -1155,20 +1197,35 @@ function onWindowMouseUp() {
   pushHistory();
 }
 
+// Drawn into previewLayer, never handlesLayer, so this hover-only feedback
+// can never overwrite the selected curve's actual drag handles underneath it.
 function onStageMouseMove(evt) {
-  if (state.tool === "curve" && !dragCtx && !drawPending) {
-    svg.style.cursor = hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt)) ? "grab" : "crosshair";
-  } else if (state.tool === "surface" && !dragCtx) {
+  if (state.tool === "curve" && !dragCtx) {
+    if (drawPending) {
+      const p = snapForDrawing(evt);
+      const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
+      const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
+      previewLayer.innerHTML =
+        `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${5/currentScale()}" fill="#5b8cff"></circle>` +
+        `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.5/currentScale()}" stroke-dasharray="${4/currentScale()},${3/currentScale()}"></path>` +
+        `<circle cx="${p.x}" cy="${p.y}" r="${4/currentScale()}" fill="#5b8cff" opacity="0.6"></circle>`;
+      return;
+    }
+    if (hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt))) {
+      svg.style.cursor = "grab";
+      previewLayer.innerHTML = "";
+      return;
+    }
+    svg.style.cursor = "crosshair";
+    const p = snapForDrawing(evt);
+    previewLayer.innerHTML =
+      `<circle cx="${p.x}" cy="${p.y}" r="${5/currentScale()}" fill="none" stroke="#5b8cff" stroke-width="${1.5/currentScale()}"></circle>`;
+    return;
+  }
+  if (state.tool === "surface" && !dragCtx) {
     svg.style.cursor = hitTestFace(toSvgPoint(evt)) ? "pointer" : "default";
   }
-  if (state.tool !== "curve" || !drawPending) return;
-  const p = snapForDrawing(evt);
-  const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
-  const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
-  handlesLayer.innerHTML =
-    `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${5/currentScale()}" fill="#5b8cff"></circle>` +
-    `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.5/currentScale()}" stroke-dasharray="${4/currentScale()},${3/currentScale()}"></path>` +
-    `<circle cx="${p.x}" cy="${p.y}" r="${4/currentScale()}" fill="#5b8cff" opacity="0.6"></circle>`;
+  previewLayer.innerHTML = "";
 }
 
 function setTool(tool) {
@@ -1176,6 +1233,7 @@ function setTool(tool) {
   drawPending = null;
   state.selection = null;
   hideHint();
+  previewLayer.innerHTML = "";
   document.getElementById("tool-page").classList.toggle("active", tool === "page");
   document.getElementById("tool-grid").classList.toggle("active", tool === "grid");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
@@ -1232,6 +1290,7 @@ function isTyping(evt) {
 
 svg.addEventListener("mousedown", onStageMouseDown);
 svg.addEventListener("mousemove", onStageMouseMove);
+svg.addEventListener("mouseleave", () => { previewLayer.innerHTML = ""; });
 
 document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
