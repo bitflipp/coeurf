@@ -33,7 +33,7 @@ test("a simple non-self-intersecting curve to the border yields exactly one boun
 });
 
 test("drawing a curve via the UI still forms a clickable, stylable face", async ({ page }) => {
-  await page.click("#tool-draw");
+  await page.click("#tool-curve");
   const box = await page.locator("#stage").boundingBox();
   const toPixel = (x, y) => ({ x: box.x + (x / 800) * box.width, y: box.y + (y / 600) * box.height });
 
@@ -47,7 +47,7 @@ test("drawing a curve via the UI still forms a clickable, stylable face", async 
   const faces = await page.evaluate(() => window.__coeurf.getFaces().map((f) => f.signature));
   expect(faces.length).toBe(2);
 
-  await page.click("#tool-select");
+  await page.click("#tool-surface");
   const mid = toPixel(100, 300);
   await page.mouse.click(mid.x, mid.y);
   const selection = await page.evaluate(() => window.__coeurf.state.selection);

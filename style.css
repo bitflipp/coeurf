@@ -101,6 +101,28 @@ button:disabled { opacity: 0.4; cursor: default; }
   min-height: 0;
 }
 
+#tool-dock {
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--panel-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+#tool-buttons {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+#tool-buttons .tool-btn {
+  flex: 1;
+  padding: 8px 4px;
+}
+
 #canvas-scroll {
   flex: 1;
   overflow: auto;
@@ -120,12 +142,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 
 #panel {
-  width: 270px;
-  flex-shrink: 0;
-  background: var(--panel-bg);
-  border-left: 1px solid var(--border);
   padding: 14px;
-  overflow-y: auto;
 }
 
 .panel-empty {
