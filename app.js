@@ -1027,6 +1027,16 @@ function onStageMouseDown(evt) {
   const curveHit = hitTestCurve(pt);
   if (curveHit) {
     setSelection({ type: "curve", id: curveHit.id });
+    dragCtx = {
+      kind: "curve",
+      curve: curveHit,
+      start: pt,
+      moved: false,
+      orig: { p0: { ...curveHit.p0 }, c1: { ...curveHit.c1 }, c2: { ...curveHit.c2 }, p3: { ...curveHit.p3 } },
+    };
+    svg.style.cursor = "grabbing";
+    window.addEventListener("mousemove", onWindowMouseMove);
+    window.addEventListener("mouseup", onWindowMouseUp);
     return;
   }
   const faceHit = hitTestFace(pt);
@@ -1039,6 +1049,27 @@ function onStageMouseDown(evt) {
 
 function onWindowMouseMove(evt) {
   if (!dragCtx) return;
+  if (dragCtx.kind === "curve") {
+    const raw = toSvgPoint(evt);
+    const res = state.grid.resolution;
+    const { width: W, height: H } = state.grid;
+    const { orig } = dragCtx;
+    const xs = [orig.p0.x, orig.c1.x, orig.c2.x, orig.p3.x];
+    const ys = [orig.p0.y, orig.c1.y, orig.c2.y, orig.p3.y];
+    let dx = Math.round((raw.x - dragCtx.start.x) / res) * res;
+    let dy = Math.round((raw.y - dragCtx.start.y) / res) * res;
+    dx = Math.max(-Math.min(...xs), Math.min(W - Math.max(...xs), dx));
+    dy = Math.max(-Math.min(...ys), Math.min(H - Math.max(...ys), dy));
+    dragCtx.moved = dx !== 0 || dy !== 0;
+    const c = dragCtx.curve;
+    c.p0 = { x: orig.p0.x + dx, y: orig.p0.y + dy };
+    c.c1 = { x: orig.c1.x + dx, y: orig.c1.y + dy };
+    c.c2 = { x: orig.c2.x + dx, y: orig.c2.y + dy };
+    c.p3 = { x: orig.p3.x + dx, y: orig.p3.y + dy };
+    renderHandles();
+    curvesLayer.innerHTML = curvesMarkup(state.curves) + curvesMarkup(computeBorderSegments());
+    return;
+  }
   const raw = toSvgPoint(evt);
   const tol = 10 / currentScale();
   const near = findNearVertex(raw, tol);
@@ -1050,15 +1081,21 @@ function onWindowMouseMove(evt) {
 
 function onWindowMouseUp() {
   if (!dragCtx) return;
+  const wasNoOpCurveDrag = dragCtx.kind === "curve" && !dragCtx.moved;
   dragCtx = null;
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
+  if (state.tool === "select") svg.style.cursor = "default";
+  if (wasNoOpCurveDrag) return;
   recomputeFaces();
   render();
   pushHistory();
 }
 
 function onStageMouseMove(evt) {
+  if (state.tool === "select" && !dragCtx) {
+    svg.style.cursor = hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt)) ? "grab" : "default";
+  }
   if (state.tool !== "draw" || !drawPending) return;
   const p = snapForDrawing(evt);
   const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
