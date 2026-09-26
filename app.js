@@ -210,7 +210,7 @@ function splitCurvesAtIntersections(curves) {
 /* ---------------------------------------------------------------------- */
 
 const state = {
-  grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true },
+  grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   curves: [],        // {id, isBorder, p0,c1,c2,p3, width, color}
   faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
   selection: null,    // {type:'curve', id} | {type:'face', signature}
@@ -244,6 +244,7 @@ function pushHistory() {
 function restoreFromSnapshot(snap) {
   state.grid = JSON.parse(JSON.stringify(snap.grid));
   if (state.grid.visible === undefined) state.grid.visible = true;
+  if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
   state.faceStyles = JSON.parse(JSON.stringify(snap.faceStyles));
   state.curveIdCounter = snap.curveIdCounter;
@@ -658,19 +659,47 @@ function currentScale() {
   return rect.width / state.grid.width;
 }
 
+// Fractional (0..1) positions of each special-line family along one axis.
+// "center" is the midpoint; "thirds" is the rule-of-thirds pair; "golden"
+// is the golden-section pair (1/phi and 1 - 1/phi), symmetric about center.
+const SPECIAL_LINE_FRACTIONS = {
+  center: [0.5],
+  thirds: [1 / 3, 2 / 3],
+  golden: [(Math.sqrt(5) - 1) / 2, (3 - Math.sqrt(5)) / 2],
+};
+
+function specialGuideLinesMarkup(W, H, scale) {
+  const enabled = state.grid.specialLines || {};
+  const lw = 1 / scale, dash = 5 / scale;
+  let html = "";
+  for (const key of Object.keys(SPECIAL_LINE_FRACTIONS)) {
+    if (!enabled[key]) continue;
+    for (const f of SPECIAL_LINE_FRACTIONS[key]) {
+      const x = W * f, y = H * f;
+      html += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#ffffff" stroke-width="${lw}" stroke-dasharray="${dash},${dash}"/>`;
+      html += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#ffffff" stroke-width="${lw}" stroke-dasharray="${dash},${dash}"/>`;
+    }
+  }
+  return html;
+}
+
 function renderGrid() {
   const { width: W, height: H, resolution: res, visible: show } = state.grid;
   if (!show) { gridLayer.innerHTML = ""; return; }
   const patId = "gridpat";
-  const lw = 1 / currentScale();
+  const scale = currentScale();
+  const lw = 1 / scale;
   // White stroke + mix-blend-mode:difference inverts whatever is underneath,
   // so the grid stays visible over any fill/gradient/curve color instead of
-  // needing a fixed color that only works on a light background.
+  // needing a fixed color that only works on a light background. The special
+  // guide lines below reuse the same trick, dashed so they read as guides
+  // rather than more grid.
   gridLayer.innerHTML =
     `<defs><pattern id="${patId}" width="${res}" height="${res}" patternUnits="userSpaceOnUse">` +
     `<path d="M ${res} 0 L 0 0 0 ${res}" fill="none" stroke="#ffffff" stroke-width="${lw}"/>` +
     `</pattern></defs>` +
-    `<rect x="0" y="0" width="${W}" height="${H}" fill="url(#${patId})" style="mix-blend-mode:difference"></rect>`;
+    `<rect x="0" y="0" width="${W}" height="${H}" fill="url(#${patId})" style="mix-blend-mode:difference"></rect>` +
+    `<g style="mix-blend-mode:difference">${specialGuideLinesMarkup(W, H, scale)}</g>`;
 }
 
 function renderHandles() {
@@ -770,13 +799,22 @@ function renderPagePanel() {
   }
 }
 
+const SPECIAL_LINE_LABELS = { center: "Center", thirds: "Thirds", golden: "Golden ratio" };
+
 function renderGridPanel() {
   const g = state.grid;
+  const specialRows = Object.keys(SPECIAL_LINE_LABELS).map(key =>
+    `<div class="field-row"><label>${SPECIAL_LINE_LABELS[key]}</label><input type="checkbox" class="g-special" data-key="${key}" ${g.specialLines[key] ? "checked" : ""}></div>`
+  ).join("");
   panel.innerHTML = `
     <div class="panel-section">
       <h3>Grid</h3>
       <div class="field-row"><label>Visible</label><input type="checkbox" id="g-visible" ${g.visible ? "checked" : ""}></div>
       <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="g-res" value="${g.resolution}"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Guide lines</h3>
+      ${specialRows}
     </div>
   `;
   document.getElementById("g-visible").addEventListener("change", e => {
@@ -791,6 +829,13 @@ function renderGridPanel() {
     render();
     pushHistory();
   });
+  for (const el of document.querySelectorAll(".g-special")) {
+    el.addEventListener("change", e => {
+      state.grid.specialLines[e.target.dataset.key] = e.target.checked;
+      renderCanvas();
+      pushHistory();
+    });
+  }
 }
 
 function renderCurvePanel() {
