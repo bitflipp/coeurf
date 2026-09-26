@@ -750,20 +750,7 @@ function renderCurvePanel() {
         <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
         <span class="num-out">${c.width}px</span>
       </div>
-      <div class="coord-grid">
-        <div class="coord-label">Start (P0)</div>
-        <input type="number" id="f-p0x" value="${fmt(c.p0.x)}">
-        <input type="number" id="f-p0y" value="${fmt(c.p0.y)}">
-        <div class="coord-label">Control 1</div>
-        <input type="number" id="f-c1x" value="${fmt(c.c1.x)}">
-        <input type="number" id="f-c1y" value="${fmt(c.c1.y)}">
-        <div class="coord-label">Control 2</div>
-        <input type="number" id="f-c2x" value="${fmt(c.c2.x)}">
-        <input type="number" id="f-c2y" value="${fmt(c.c2.y)}">
-        <div class="coord-label">End (P3)</div>
-        <input type="number" id="f-p3x" value="${fmt(c.p3.x)}">
-        <input type="number" id="f-p3y" value="${fmt(c.p3.y)}">
-      </div>
+      <button class="block-btn" id="f-mirror">Mirror copy</button>
       <button class="danger-btn" id="f-delete">Delete curve</button>
     </div>
   `;
@@ -780,22 +767,13 @@ function renderCurvePanel() {
   });
   widthInput.addEventListener("change", () => pushHistory());
 
-  const coordMap = [["f-p0x","p0","x"],["f-p0y","p0","y"],["f-c1x","c1","x"],["f-c1y","c1","y"],
-    ["f-c2x","c2","x"],["f-c2y","c2","y"],["f-p3x","p3","x"],["f-p3y","p3","y"]];
-  for (const [id, pt, axis] of coordMap) {
-    document.getElementById(id).addEventListener("change", e => {
-      const res = state.grid.resolution;
-      let v = parseFloat(e.target.value);
-      if (isNaN(v)) v = c[pt][axis];
-      v = Math.round(v / res) * res;
-      const bound = axis === "x" ? state.grid.width : state.grid.height;
-      v = Math.max(0, Math.min(bound, v));
-      c[pt][axis] = v;
-      recomputeFaces();
-      render();
-      pushHistory();
-    });
-  }
+  document.getElementById("f-mirror").addEventListener("click", () => {
+    const mirrored = mirrorCurve(c);
+    state.curves.push(mirrored);
+    recomputeFaces();
+    setSelection({ type: "curve", id: mirrored.id });
+    pushHistory();
+  });
 
   document.getElementById("f-delete").addEventListener("click", () => {
     state.curves = state.curves.filter(cv => cv.id !== c.id);
@@ -994,6 +972,23 @@ function defaultCurveBetween(p0, p3, res) {
     c1: { x: lerp(p0.x, p3.x, 1/3), y: lerp(p0.y, p3.y, 1/3) },
     c2: { x: lerp(p0.x, p3.x, 2/3), y: lerp(p0.y, p3.y, 2/3) },
   };
+}
+
+// Mirrors a curve across the line through its own start and end point,
+// producing a new curve so symmetric shapes can be built from one half.
+function mirrorCurve(c) {
+  const p0 = c.p0, p3 = c.p3;
+  let dx = p3.x - p0.x, dy = p3.y - p0.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) { dx = 0; dy = 1; } else { dx /= len; dy /= len; }
+  const reflect = p => {
+    const t = (p.x - p0.x) * dx + (p.y - p0.y) * dy;
+    const projX = p0.x + t * dx, projY = p0.y + t * dy;
+    return { x: 2 * projX - p.x, y: 2 * projY - p.y };
+  };
+  const id = "c" + (state.curveIdCounter++);
+  return { id, isBorder: false, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
+    width: c.width, color: c.color };
 }
 
 function onStageMouseDown(evt) {
