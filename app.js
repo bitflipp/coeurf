@@ -210,11 +210,11 @@ function splitCurvesAtIntersections(curves) {
 /* ---------------------------------------------------------------------- */
 
 const state = {
-  grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2 },
+  grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true },
   curves: [],        // {id, isBorder, p0,c1,c2,p3, width, color}
   faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
   selection: null,    // {type:'curve', id} | {type:'face', signature}
-  tool: "curve",      // "page" | "curve" | "surface"
+  tool: "curve",      // "page" | "grid" | "curve" | "surface"
   curveIdCounter: 1,
 };
 
@@ -243,6 +243,7 @@ function pushHistory() {
 
 function restoreFromSnapshot(snap) {
   state.grid = JSON.parse(JSON.stringify(snap.grid));
+  if (state.grid.visible === undefined) state.grid.visible = true;
   state.curves = JSON.parse(JSON.stringify(snap.curves));
   state.faceStyles = JSON.parse(JSON.stringify(snap.faceStyles));
   state.curveIdCounter = snap.curveIdCounter;
@@ -654,8 +655,7 @@ function currentScale() {
 }
 
 function renderGrid() {
-  const { width: W, height: H, resolution: res } = state.grid;
-  const show = document.getElementById("toggle-grid").checked;
+  const { width: W, height: H, resolution: res, visible: show } = state.grid;
   if (!show) { gridLayer.innerHTML = ""; return; }
   const patId = "gridpat";
   const lw = 1 / currentScale();
@@ -724,6 +724,7 @@ const panel = document.getElementById("panel");
 
 function renderPanel() {
   if (state.tool === "page") { renderPagePanel(); return; }
+  if (state.tool === "grid") { renderGridPanel(); return; }
   if (!state.selection) {
     const msg = state.tool === "surface"
       ? "Nothing selected.<br>Click inside a region to select its surface."
@@ -745,22 +746,44 @@ function renderPagePanel() {
       <h3>Page</h3>
       <div class="field-row"><label>Width</label><input type="number" min="20" step="1" id="p-width" value="${g.width}"></div>
       <div class="field-row"><label>Height</label><input type="number" min="20" step="1" id="p-height" value="${g.height}"></div>
-      <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="p-res" value="${g.resolution}"></div>
       <div class="field-row"><label>Border color</label><input type="color" id="p-bcolor" value="${g.borderColor}"></div>
       <div class="field-row"><label>Border width</label><input type="number" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"></div>
-      <button class="block-btn" id="p-apply">Apply</button>
     </div>
   `;
-  document.getElementById("p-apply").addEventListener("click", () => {
+  const applyPageFields = () => {
     const w = Math.max(20, parseInt(document.getElementById("p-width").value, 10) || state.grid.width);
     const h = Math.max(20, parseInt(document.getElementById("p-height").value, 10) || state.grid.height);
-    const res = Math.max(2, parseInt(document.getElementById("p-res").value, 10) || state.grid.resolution);
     state.grid.width = w;
     state.grid.height = h;
-    state.grid.resolution = res;
     state.grid.borderColor = document.getElementById("p-bcolor").value;
     state.grid.borderWidth = parseFloat(document.getElementById("p-bwidth").value) || 0;
     recomputeFaces();
+    render();
+    pushHistory();
+  };
+  for (const id of ["p-width", "p-height", "p-bcolor", "p-bwidth"]) {
+    document.getElementById(id).addEventListener("change", applyPageFields);
+  }
+}
+
+function renderGridPanel() {
+  const g = state.grid;
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Grid</h3>
+      <div class="field-row"><label>Visible</label><input type="checkbox" id="g-visible" ${g.visible ? "checked" : ""}></div>
+      <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="g-res" value="${g.resolution}"></div>
+    </div>
+  `;
+  document.getElementById("g-visible").addEventListener("change", e => {
+    state.grid.visible = e.target.checked;
+    renderCanvas();
+    pushHistory();
+  });
+  document.getElementById("g-res").addEventListener("change", e => {
+    const res = Math.max(2, parseInt(e.target.value, 10) || state.grid.resolution);
+    state.grid.resolution = res;
+    e.target.value = res;
     render();
     pushHistory();
   });
@@ -1025,7 +1048,7 @@ function mirrorCurve(c) {
 function onStageMouseDown(evt) {
   if (evt.button !== 0) return;
 
-  if (state.tool === "page") return;
+  if (state.tool === "page" || state.tool === "grid") return;
 
   if (state.tool === "surface") {
     const pt = toSvgPoint(evt);
@@ -1154,6 +1177,7 @@ function setTool(tool) {
   state.selection = null;
   hideHint();
   document.getElementById("tool-page").classList.toggle("active", tool === "page");
+  document.getElementById("tool-grid").classList.toggle("active", tool === "grid");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
   document.getElementById("tool-surface").classList.toggle("active", tool === "surface");
   svg.style.cursor = "default";
@@ -1166,6 +1190,7 @@ function setTool(tool) {
 }
 
 document.getElementById("tool-page").addEventListener("click", () => setTool("page"));
+document.getElementById("tool-grid").addEventListener("click", () => setTool("grid"));
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
 document.getElementById("tool-surface").addEventListener("click", () => setTool("surface"));
 
@@ -1185,6 +1210,8 @@ document.addEventListener("keydown", evt => {
     setTool("surface");
   } else if (evt.key.toLowerCase() === "p" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("page");
+  } else if (evt.key.toLowerCase() === "g" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("grid");
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") {
     evt.preventDefault();
     if (evt.shiftKey) redo(); else undo();
@@ -1206,7 +1233,6 @@ function isTyping(evt) {
 svg.addEventListener("mousedown", onStageMouseDown);
 svg.addEventListener("mousemove", onStageMouseMove);
 
-document.getElementById("toggle-grid").addEventListener("change", render);
 document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
 document.getElementById("save-btn").addEventListener("click", saveToLocalStorage);
