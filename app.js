@@ -17,6 +17,13 @@ function cubicPoint(p0, c1, c2, p3, t) {
   return { x, y };
 }
 
+function cubicTangent(p0, c1, c2, p3, t) {
+  const u = 1 - t;
+  const x = 3*u*u*(c1.x - p0.x) + 6*u*t*(c2.x - c1.x) + 3*t*t*(p3.x - c2.x);
+  const y = 3*u*u*(c1.y - p0.y) + 6*u*t*(c2.y - c1.y) + 3*t*t*(p3.y - c2.y);
+  return { x, y };
+}
+
 function flattenCubic(p0, c1, c2, p3, segments) {
   const pts = [];
   for (let i = 0; i <= segments; i++) pts.push(cubicPoint(p0, c1, c2, p3, i / segments));
@@ -211,7 +218,7 @@ function splitCurvesAtIntersections(curves) {
 
 const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
-  curves: [],        // {id, isBorder, p0,c1,c2,p3, width, color}
+  curves: [],        // {id, isBorder, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
   faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
   selection: null,    // {type:'curve', id} | {type:'face', signature}
   tool: "curve",      // "page" | "grid" | "curve" | "surface"
@@ -614,15 +621,126 @@ function buildDefsAndFaceMarkup(faces, curvesById) {
 
 function escapeAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
 
+function curveGradientId(id) {
+  return "curve-grad-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
+}
+
+// Below this, a tangent is treated as "zero" - i.e. the curve's own control
+// point sits right on its anchor, so there's no reliable direction left to
+// offset in.
+const TANGENT_EPS = 1e-4;
+
+function unitNormal(tan) {
+  const len = Math.hypot(tan.x, tan.y);
+  if (len < 1e-6) return { x: 0, y: 1 };
+  return { x: -tan.y / len, y: tan.x / len };
+}
+
+// Offsets one rail (sign +1/-1) of a cubic bezier by a half-width that
+// tapers linearly from w0 to w1. The endpoints are pushed out along the
+// normal at their end of the curve (p0 uses n0, p3 uses n1) - exact, not an
+// approximation. The interior control points are where the approximation
+// error - the "drift" from a true offset curve - actually lives: pushing
+// them out along the same fixed n0/n1 (rather than the true, continuously
+// turning normal) is what makes the rail bulge or lean on a curved
+// baseline instead of tracking it exactly. `drift` blends each interior
+// point between that approximation (drift=1, the default) and the point a
+// perfectly straight-sided wedge would use (drift=0, no bulge at all);
+// past 1 it extrapolates beyond the approximation, exaggerating the same
+// bulge/lean for effect rather than correcting it.
+function offsetBezierRail(c, w0, w1, sign, n0, n1, drift) {
+  const h0 = sign * w0 / 2;
+  const h1 = sign * w1 / 2;
+  const hc1 = sign * lerp(w0, w1, 1 / 3) / 2;
+  const hc2 = sign * lerp(w0, w1, 2 / 3) / 2;
+  const p0 = { x: c.p0.x + n0.x * h0, y: c.p0.y + n0.y * h0 };
+  const p3 = { x: c.p3.x + n1.x * h1, y: c.p3.y + n1.y * h1 };
+  const approxC1 = { x: c.c1.x + n0.x * hc1, y: c.c1.y + n0.y * hc1 };
+  const approxC2 = { x: c.c2.x + n1.x * hc2, y: c.c2.y + n1.y * hc2 };
+  const flatC1 = { x: lerp(p0.x, p3.x, 1 / 3), y: lerp(p0.y, p3.y, 1 / 3) };
+  const flatC2 = { x: lerp(p0.x, p3.x, 2 / 3), y: lerp(p0.y, p3.y, 2 / 3) };
+  return {
+    p0,
+    c1: { x: flatC1.x + drift * (approxC1.x - flatC1.x), y: flatC1.y + drift * (approxC1.y - flatC1.y) },
+    c2: { x: flatC2.x + drift * (approxC2.x - flatC2.x), y: flatC2.y + drift * (approxC2.y - flatC2.y) },
+    p3,
+  };
+}
+
+// Builds a filled ribbon outline for a curve whose start/end widths differ,
+// since a plain stroked <path> can only ever have one constant stroke-width:
+// two offset bezier "rails" (see offsetBezierRail) joined into one closed,
+// filled path, i.e. two concurrent curves with the area between them filled.
+//
+// Where an endpoint's tangent is (near) zero there's no reliable normal to
+// offset along, so unitNormal falls back to an arbitrary fixed direction and
+// the ribbon closes with a flat edge there, angled however that guess landed
+// - it can look visibly wrong rather than just imprecise. Since that flat
+// edge's two corners are always exactly half-width from the anchor point
+// (whatever direction they were pushed in), a circle of that same radius
+// centered on the anchor fully encloses them regardless of the guessed
+// direction. So instead of trusting the guess, this reports where a round
+// cap disc is needed and lets the caller draw one over the arbitrary edge -
+// the same fix stroke-linecap:"round" gives an ordinary stroke.
+function taperedRibbonPath(c, w0, w1, drift) {
+  const tan0 = cubicTangent(c.p0, c.c1, c.c2, c.p3, 0);
+  const tan1 = cubicTangent(c.p0, c.c1, c.c2, c.p3, 1);
+  const n0 = unitNormal(tan0);
+  const n1 = unitNormal(tan1);
+  const top = offsetBezierRail(c, w0, w1, 1, n0, n1, drift);
+  const bottom = offsetBezierRail(c, w0, w1, -1, n0, n1, drift);
+  const d = `M ${fmt(top.p0.x)} ${fmt(top.p0.y)} ` +
+    `C ${fmt(top.c1.x)} ${fmt(top.c1.y)}, ${fmt(top.c2.x)} ${fmt(top.c2.y)}, ${fmt(top.p3.x)} ${fmt(top.p3.y)} ` +
+    `L ${fmt(bottom.p3.x)} ${fmt(bottom.p3.y)} ` +
+    `C ${fmt(bottom.c2.x)} ${fmt(bottom.c2.y)}, ${fmt(bottom.c1.x)} ${fmt(bottom.c1.y)}, ${fmt(bottom.p0.x)} ${fmt(bottom.p0.y)} Z`;
+  return {
+    d,
+    capStart: Math.hypot(tan0.x, tan0.y) < TANGENT_EPS ? { x: c.p0.x, y: c.p0.y, r: w0 / 2 } : null,
+    capEnd: Math.hypot(tan1.x, tan1.y) < TANGENT_EPS ? { x: c.p3.x, y: c.p3.y, r: w1 / 2 } : null,
+  };
+}
+
 function curvesMarkup(curves) {
+  let defs = "";
   let body = "";
   for (const c of curves) {
     const selected = state.selection && state.selection.type === "curve" && state.selection.id === c.id;
-    const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
-    const strokeColor = selected ? "#5b8cff" : c.color;
-    body += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${c.width}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
+    const w0 = c.width;
+    const w1 = c.width2 != null ? c.width2 : c.width;
+    // The ribbon path is what carries the "drift" bulge (see
+    // offsetBezierRail), so it's used whenever Taper is on - even with equal
+    // start/end widths - so the Drift control still has something to act on.
+    const tapered = c.width2 != null;
+    const drift = c.drift != null ? c.drift : 1;
+
+    let paint;
+    if (selected) {
+      paint = "#5b8cff";
+    } else if (c.colorMode === "gradient" && c.color2) {
+      const gid = curveGradientId(c.id);
+      const v = gradientVector(c.gradientAngle || 0);
+      defs += `<linearGradient id="${gid}" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
+        `<stop offset="0%" stop-color="${c.color}"/>` +
+        `<stop offset="100%" stop-color="${c.color2}"/>` +
+        `</linearGradient>`;
+      paint = `url(#${gid})`;
+    } else {
+      paint = c.color;
+    }
+
+    if (tapered) {
+      const ribbon = taperedRibbonPath(c, w0, w1, drift);
+      body += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
+      for (const cap of [ribbon.capStart, ribbon.capEnd]) {
+        if (!cap) continue;
+        body += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></circle>`;
+      }
+    } else {
+      const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
+      body += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
+    }
   }
-  return body;
+  return { defs, body };
 }
 
 // Selected-face highlight: drawn in its own layer above the curve strokes so
@@ -735,10 +853,12 @@ function renderCanvas() {
   renderGrid();
 
   const { defs, body } = buildDefsAndFaceMarkup(facesCache, facesCache.curvesById || {});
-  defsLayer.innerHTML = defs;
+  const curveA = curvesMarkup(state.curves);
+  const curveB = curvesMarkup(computeBorderSegments());
+  defsLayer.innerHTML = defs + curveA.defs + curveB.defs;
   facesLayer.innerHTML = body;
 
-  curvesLayer.innerHTML = curvesMarkup(state.curves) + curvesMarkup(computeBorderSegments());
+  curvesLayer.innerHTML = curveA.body + curveB.body;
   selectionLayer.innerHTML = selectionOverlayMarkup(facesCache.curvesById || {});
 
   renderHandles();
@@ -841,27 +961,117 @@ function renderGridPanel() {
 function renderCurvePanel() {
   const c = state.curves.find(cv => cv.id === state.selection.id);
   if (!c) { state.selection = null; renderPanel(); return; }
+  const isGrad = c.colorMode === "gradient";
+  const isTapered = c.width2 != null;
   panel.innerHTML = `
     <div class="panel-section">
       <h3>Curve</h3>
-      <div class="field-row">
-        <label>Color</label>
-        <input type="color" id="f-color" value="${c.color}">
+      <div class="seg">
+        <button id="c-solid" class="${!isGrad ? "active" : ""}">Solid</button>
+        <button id="c-grad" class="${isGrad ? "active" : ""}">Gradient</button>
       </div>
+      <div id="color-fields"></div>
       <div class="field-row">
-        <label>Width</label>
+        <label>${isTapered ? "Start width" : "Width"}</label>
         <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
         <input type="number" class="num-in" id="f-width-num" min="0.5" max="30" step="0.5" value="${c.width}">
       </div>
+      <div class="field-row"><label>Taper</label><input type="checkbox" id="f-taper" ${isTapered ? "checked" : ""}></div>
+      <div id="taper-fields"></div>
       <button class="block-btn" id="f-mirror">Mirror copy</button>
       <button class="danger-btn" id="f-delete">Delete curve</button>
     </div>
   `;
-  document.getElementById("f-color").addEventListener("input", e => {
-    c.color = e.target.value;
-    renderCanvas();
+
+  const colorFields = document.getElementById("color-fields");
+
+  function paintSolidFields() {
+    colorFields.innerHTML = `
+      <div class="field-row">
+        <label>Color</label>
+        <input type="color" id="f-color" value="${c.color}">
+      </div>
+    `;
+    document.getElementById("f-color").addEventListener("input", e => {
+      c.color = e.target.value;
+      renderCanvas();
+    });
+    document.getElementById("f-color").addEventListener("change", () => pushHistory());
+  }
+
+  function paintGradientFields() {
+    colorFields.innerHTML = `
+      <div class="gradient-preview" id="f-gpreview"></div>
+      <div class="field-row">
+        <label>Start</label>
+        <input type="color" id="f-g1" value="${c.color}">
+      </div>
+      <div class="field-row">
+        <label>End</label>
+        <input type="color" id="f-g2" value="${c.color2}">
+      </div>
+      <div class="field-row">
+        <label>Angle</label>
+        <input type="range" id="f-gangle" min="0" max="359" step="1" value="${c.gradientAngle}">
+        <input type="number" class="num-in" id="f-gangle-num" min="0" max="359" step="1" value="${c.gradientAngle}">
+        <span class="unit">&deg;</span>
+      </div>
+    `;
+    const updatePreview = () => {
+      document.getElementById("f-gpreview").style.background =
+        `linear-gradient(${c.gradientAngle}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
+    };
+    updatePreview();
+    document.getElementById("f-g1").addEventListener("input", e => {
+      c.color = e.target.value;
+      updatePreview(); renderCanvas();
+    });
+    document.getElementById("f-g1").addEventListener("change", () => pushHistory());
+    document.getElementById("f-g2").addEventListener("input", e => {
+      c.color2 = e.target.value;
+      updatePreview(); renderCanvas();
+    });
+    document.getElementById("f-g2").addEventListener("change", () => pushHistory());
+    const angleInput = document.getElementById("f-gangle");
+    const angleNum = document.getElementById("f-gangle-num");
+    angleInput.addEventListener("input", e => {
+      c.gradientAngle = parseInt(e.target.value, 10);
+      angleNum.value = c.gradientAngle;
+      updatePreview(); renderCanvas();
+    });
+    angleInput.addEventListener("change", () => pushHistory());
+    angleNum.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      if (!Number.isFinite(v)) return;
+      c.gradientAngle = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+    });
+    angleNum.addEventListener("change", e => {
+      const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
+      c.gradientAngle = v;
+      e.target.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
+    });
+  }
+
+  if (isGrad) paintGradientFields(); else paintSolidFields();
+
+  document.getElementById("c-solid").addEventListener("click", () => {
+    if (c.colorMode !== "gradient") return;
+    c.colorMode = "solid";
+    renderCurvePanel(); renderCanvas(); pushHistory();
   });
-  document.getElementById("f-color").addEventListener("change", () => pushHistory());
+  document.getElementById("c-grad").addEventListener("click", () => {
+    if (c.colorMode === "gradient") return;
+    c.colorMode = "gradient";
+    c.color2 = c.color2 || "#5b8cff";
+    c.gradientAngle = c.gradientAngle != null ? c.gradientAngle : 90;
+    renderCurvePanel(); renderCanvas(); pushHistory();
+  });
+
   // Live 'input' updates only repaint the canvas, never the panel: rebuilding
   // this input's own DOM node mid-drag/mid-keystroke would drop the browser's
   // focus/pointer-capture on it, stalling the drag or losing keystrokes.
@@ -887,6 +1097,81 @@ function renderCurvePanel() {
     widthInput.value = v;
     renderCanvas();
     pushHistory();
+  });
+
+  const taperFields = document.getElementById("taper-fields");
+  function paintTaperFields() {
+    if (c.width2 == null) { taperFields.innerHTML = ""; return; }
+    const drift = c.drift != null ? c.drift : 1;
+    taperFields.innerHTML = `
+      <div class="field-row">
+        <label>End width</label>
+        <input type="range" id="f-width2" min="0.5" max="30" step="0.5" value="${c.width2}">
+        <input type="number" class="num-in" id="f-width2-num" min="0.5" max="30" step="0.5" value="${c.width2}">
+      </div>
+      <div class="field-row">
+        <label>Drift</label>
+        <input type="range" id="f-drift" min="0" max="5" step="0.1" value="${drift}">
+        <input type="number" class="num-in" id="f-drift-num" min="0" max="5" step="0.1" value="${drift}">
+      </div>
+    `;
+    const width2Input = document.getElementById("f-width2");
+    const width2Num = document.getElementById("f-width2-num");
+    width2Input.addEventListener("input", e => {
+      c.width2 = parseFloat(e.target.value);
+      width2Num.value = c.width2;
+      renderCanvas();
+    });
+    width2Input.addEventListener("change", () => pushHistory());
+    width2Num.addEventListener("input", e => {
+      const v = parseFloat(e.target.value);
+      if (!Number.isFinite(v)) return;
+      c.width2 = v;
+      width2Input.value = v;
+      renderCanvas();
+    });
+    width2Num.addEventListener("change", e => {
+      const v = Math.max(0.5, Math.min(30, parseFloat(e.target.value) || c.width2));
+      c.width2 = v;
+      e.target.value = v;
+      width2Input.value = v;
+      renderCanvas();
+      pushHistory();
+    });
+
+    // Drift blends each rail's interior control point between a flat,
+    // straight-sided wedge (0) and the tangent-based offset approximation
+    // (1, the default); beyond 1 it extrapolates past the approximation,
+    // exaggerating the same bulge/lean instead of correcting it.
+    const driftInput = document.getElementById("f-drift");
+    const driftNum = document.getElementById("f-drift-num");
+    driftInput.addEventListener("input", e => {
+      c.drift = parseFloat(e.target.value);
+      driftNum.value = c.drift;
+      renderCanvas();
+    });
+    driftInput.addEventListener("change", () => pushHistory());
+    driftNum.addEventListener("input", e => {
+      const v = parseFloat(e.target.value);
+      if (!Number.isFinite(v)) return;
+      c.drift = v;
+      driftInput.value = v;
+      renderCanvas();
+    });
+    driftNum.addEventListener("change", e => {
+      const v = Math.max(0, Math.min(5, parseFloat(e.target.value)));
+      c.drift = Number.isFinite(v) ? v : 1;
+      e.target.value = c.drift;
+      driftInput.value = c.drift;
+      renderCanvas();
+      pushHistory();
+    });
+  }
+  paintTaperFields();
+
+  document.getElementById("f-taper").addEventListener("change", e => {
+    c.width2 = e.target.checked ? c.width : null;
+    renderCurvePanel(); renderCanvas(); pushHistory();
   });
 
   document.getElementById("f-mirror").addEventListener("click", () => {
@@ -1129,7 +1414,8 @@ function mirrorCurve(c) {
   };
   const id = "c" + (state.curveIdCounter++);
   return { id, isBorder: false, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
-    width: c.width, color: c.color };
+    width: c.width, width2: c.width2, drift: c.drift, color: c.color,
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
 }
 
 function onStageMouseDown(evt) {
@@ -1217,7 +1503,7 @@ function onWindowMouseMove(evt) {
     c.c2 = { x: orig.c2.x + dx, y: orig.c2.y + dy };
     c.p3 = { x: orig.p3.x + dx, y: orig.p3.y + dy };
     renderHandles();
-    curvesLayer.innerHTML = curvesMarkup(state.curves) + curvesMarkup(computeBorderSegments());
+    curvesLayer.innerHTML = curvesMarkup(state.curves).body + curvesMarkup(computeBorderSegments()).body;
     return;
   }
   const raw = toSvgPoint(evt);
@@ -1226,7 +1512,7 @@ function onWindowMouseMove(evt) {
   const p = near || snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
   dragCtx.curve[dragCtx.key] = p;
   renderHandles();
-  curvesLayer.innerHTML = curvesMarkup(state.curves) + curvesMarkup(computeBorderSegments());
+  curvesLayer.innerHTML = curvesMarkup(state.curves).body + curvesMarkup(computeBorderSegments()).body;
 }
 
 function onWindowMouseUp() {
@@ -1349,10 +1635,12 @@ document.getElementById("load-btn").addEventListener("click", loadFromLocalStora
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
   const { defs, body } = buildDefsAndFaceMarkup(facesCache, facesCache.curvesById || {});
-  const curves = curvesMarkup(state.curves) + curvesMarkup(computeBorderSegments());
+  const curveA = curvesMarkup(state.curves);
+  const curveB = curvesMarkup(computeBorderSegments());
+  const curves = curveA.body + curveB.body;
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +
-    `<defs>${defs}</defs>\n` +
+    `<defs>${defs}${curveA.defs}${curveB.defs}</defs>\n` +
     `<g id="surfaces">${body}</g>\n` +
     `<g id="curves">${curves}</g>\n` +
     `</svg>\n`;
