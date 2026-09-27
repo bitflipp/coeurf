@@ -1,5 +1,5 @@
 "use strict";
-/* cœurf — grid-snapped cubic bezier editor with planar surface detection.
+/* cœurf — grid-snapped cubic bezier editor.
    No build step: this file is loaded directly as a classic script. */
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -32,47 +32,6 @@ function flattenCubic(p0, c1, c2, p3, segments) {
 
 const FLATTEN_SEGMENTS = 20;
 
-function departureAngle(from, primary, fallbackA, fallbackB) {
-  let dx = primary.x - from.x, dy = primary.y - from.y;
-  if (Math.hypot(dx, dy) < 1e-4) {
-    dx = fallbackA.x - from.x; dy = fallbackA.y - from.y;
-    if (Math.hypot(dx, dy) < 1e-4) {
-      dx = fallbackB.x - from.x; dy = fallbackB.y - from.y;
-    }
-  }
-  let a = Math.atan2(dy, dx);
-  if (a < 0) a += 2 * Math.PI;
-  return a;
-}
-
-function shoelaceArea(poly) {
-  let s = 0;
-  for (let i = 0; i < poly.length; i++) {
-    const a = poly[i], b = poly[(i + 1) % poly.length];
-    s += a.x * b.y - b.x * a.y;
-  }
-  return s / 2;
-}
-
-function pointInPolygon(pt, poly) {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
-    const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
-      (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function pointInFace(pt, face) {
-  if (!pointInPolygon(pt, face.outerFlat)) return false;
-  for (const hole of face.holes) {
-    if (pointInPolygon(pt, hole.flat)) return false;
-  }
-  return true;
-}
-
 function distToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
   const lenSq = dx*dx + dy*dy;
@@ -99,119 +58,6 @@ function snapToGrid(x, y, res, w, h) {
   return { x: sx, y: sy };
 }
 
-function vkey(p) { return `${Math.round(p.x * 100)},${Math.round(p.y * 100)}`; }
-
-/* ---------------------------------------------------------------------- */
-/* Self/mutual curve-intersection splitting                                */
-/*                                                                          */
-/* Face detection below only joins curves at shared endpoints (p0/p3): a   */
-/* curve that loops back and crosses itself mid-span, or two curves that   */
-/* cross without sharing an endpoint, are geometrically two-or-more        */
-/* surfaces but topologically invisible to that algorithm. To make those   */
-/* crossings count as real graph vertices, every curve is pre-split at any */
-/* point where its flattened polyline crosses another curve's (or its own) */
-/* polyline away from an existing shared endpoint. The split only feeds    */
-/* face detection - state.curves (drawing, editing, undo) is untouched.    */
-/* ---------------------------------------------------------------------- */
-
-function cubicSplitAt(p0, c1, c2, p3, t) {
-  const p01 = { x: lerp(p0.x, c1.x, t), y: lerp(p0.y, c1.y, t) };
-  const p12 = { x: lerp(c1.x, c2.x, t), y: lerp(c1.y, c2.y, t) };
-  const p23 = { x: lerp(c2.x, p3.x, t), y: lerp(c2.y, p3.y, t) };
-  const p012 = { x: lerp(p01.x, p12.x, t), y: lerp(p01.y, p12.y, t) };
-  const p123 = { x: lerp(p12.x, p23.x, t), y: lerp(p12.y, p23.y, t) };
-  const p0123 = { x: lerp(p012.x, p123.x, t), y: lerp(p012.y, p123.y, t) };
-  return {
-    left: { p0, c1: p01, c2: p012, p3: p0123 },
-    right: { p0: p0123, c1: p123, c2: p23, p3 },
-  };
-}
-
-// Intersection of segments p1->p2 and p3->p4, INCLUSIVE of their endpoints:
-// on a grid-snapped shape a real crossing very often lands exactly on a
-// flattened-polyline sample boundary (e.g. two straight diagonals of a square
-// meeting dead center on a 20-segment flattening), so excluding segment
-// endpoints here would miss it. Touches at a curve's *own* p0/p3 are instead
-// filtered by the caller, using the curve's global t (EPS_T below) - that is
-// robust regardless of which segment happened to catch the crossing.
-function segmentIntersection(p1, p2, p3, p4) {
-  const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
-  const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
-  const denom = d1x * d2y - d1y * d2x;
-  if (Math.abs(denom) < 1e-9) return null;
-  const ex = p3.x - p1.x, ey = p3.y - p1.y;
-  const t = (ex * d2y - ey * d2x) / denom;
-  const u = (ex * d1y - ey * d1x) / denom;
-  const EPS = 1e-9;
-  if (t < -EPS || t > 1 + EPS || u < -EPS || u > 1 + EPS) return null;
-  return { t, u, point: { x: p1.x + t * d1x, y: p1.y + t * d1y } };
-}
-
-// Splits one curve into consecutive sub-curves at the given sorted, distinct
-// breakpoints ({t, point}), forcing each new shared anchor to the exact same
-// coordinate on both sides so face detection's vkey union recognizes it as
-// one graph vertex (a linear split-point estimate would otherwise leave the
-// two sides a fraction of a unit apart).
-function splitCurveAtParams(curve, breaks) {
-  if (breaks.length === 0) return [curve];
-  const pieces = [];
-  let remaining = { p0: curve.p0, c1: curve.c1, c2: curve.c2, p3: curve.p3 };
-  let tPrev = 0;
-  for (const brk of breaks) {
-    const tLocal = (brk.t - tPrev) / (1 - tPrev);
-    const { left, right } = cubicSplitAt(remaining.p0, remaining.c1, remaining.c2, remaining.p3, tLocal);
-    left.p3 = brk.point;
-    right.p0 = brk.point;
-    pieces.push(left);
-    remaining = right;
-    tPrev = brk.t;
-  }
-  pieces.push(remaining);
-  return pieces.map((p, i) => ({ ...curve, id: `${curve.id}~${i}`, p0: p.p0, c1: p.c1, c2: p.c2, p3: p.p3 }));
-}
-
-function splitCurvesAtIntersections(curves) {
-  const N = FLATTEN_SEGMENTS;
-  const EPS_T = 1e-4;   // global-t margin excluded near each curve's own endpoints
-  const EPS_MERGE = 1e-3; // global-t margin for merging near-duplicate breakpoints
-
-  const flats = curves.map(c => flattenCubic(c.p0, c.c1, c.c2, c.p3, N));
-  const breaksByCurve = curves.map(() => []);
-
-  for (let a = 0; a < curves.length; a++) {
-    for (let b = a; b < curves.length; b++) {
-      const flatA = flats[a], flatB = flats[b];
-      for (let i = 0; i < flatA.length - 1; i++) {
-        const jStart = (a === b) ? i + 2 : 0;
-        for (let j = jStart; j < flatB.length - 1; j++) {
-          const hit = segmentIntersection(flatA[i], flatA[i + 1], flatB[j], flatB[j + 1]);
-          if (!hit) continue;
-          const tA = (i + hit.t) / N;
-          const tB = (j + hit.u) / N;
-          if (tA < EPS_T || tA > 1 - EPS_T) continue;
-          if (tB < EPS_T || tB > 1 - EPS_T) continue;
-          breaksByCurve[a].push({ t: tA, point: hit.point });
-          breaksByCurve[b].push({ t: tB, point: hit.point });
-        }
-      }
-    }
-  }
-
-  const result = [];
-  for (let idx = 0; idx < curves.length; idx++) {
-    const raw = breaksByCurve[idx];
-    if (raw.length === 0) { result.push(curves[idx]); continue; }
-    raw.sort((p, q) => p.t - q.t);
-    const merged = [];
-    for (const brk of raw) {
-      if (merged.length && brk.t - merged[merged.length - 1].t < EPS_MERGE) continue;
-      merged.push(brk);
-    }
-    result.push(...splitCurveAtParams(curves[idx], merged));
-  }
-  return result;
-}
-
 /* ---------------------------------------------------------------------- */
 /* Application state                                                       */
 /* ---------------------------------------------------------------------- */
@@ -219,13 +65,11 @@ function splitCurvesAtIntersections(curves) {
 const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   curves: [],        // {id, isBorder, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
-  faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
-  selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'face', signature}
-  tool: "curve",      // "page" | "grid" | "curve" | "surface"
+  selection: null,    // {type:'curve', id} | {type:'curves', ids}
+  tool: "curve",      // "page" | "grid" | "curve"
   curveIdCounter: 1,
 };
 
-let facesCache = [];  // last computed faces, for click hit-testing & inheritance
 let drawPending = null; // {x,y} snapped anchor while placing a new curve
 let dragCtx = null;    // active drag context
 
@@ -333,7 +177,6 @@ function cloneState() {
   return JSON.parse(JSON.stringify({
     grid: state.grid,
     curves: state.curves,
-    faceStyles: state.faceStyles,
     curveIdCounter: state.curveIdCounter,
   }));
 }
@@ -350,10 +193,8 @@ function restoreFromSnapshot(snap) {
   if (state.grid.visible === undefined) state.grid.visible = true;
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
-  state.faceStyles = JSON.parse(JSON.stringify(snap.faceStyles));
   state.curveIdCounter = snap.curveIdCounter;
   state.selection = null;
-  recomputeFaces();
   render();
 }
 
@@ -395,7 +236,7 @@ function loadFromLocalStorage() {
   if (!raw) { showHint("No saved design found."); return; }
   let snap;
   try { snap = JSON.parse(raw); } catch (e) { snap = null; }
-  if (!snap || !snap.grid || !Array.isArray(snap.curves) || typeof snap.faceStyles !== "object") {
+  if (!snap || !snap.grid || !Array.isArray(snap.curves)) {
     showHint("Saved data is corrupted and could not be loaded.");
     return;
   }
@@ -405,315 +246,51 @@ function loadFromLocalStorage() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Border management                                                       */
+/* Border rendering                                                        */
 /* ---------------------------------------------------------------------- */
 
-// The border is not stored: it is re-derived from the canvas rectangle plus
-// wherever any user curve endpoint touches that rectangle's edge. This lets a
-// curve ending on the border actually graph-connect to it (splitting the page)
-// instead of merely sitting visually on top of an unrelated fixed border curve.
-function computeBorderSegments() {
+function borderMarkup() {
   const { width: W, height: H, borderColor, borderWidth } = state.grid;
-  const EPS = 1e-6;
-  const sides = { top: [], right: [], bottom: [], left: [] };
-  const pushUnique = (arr, p) => {
-    if (!arr.some(q => Math.abs(q.x - p.x) < EPS && Math.abs(q.y - p.y) < EPS)) arr.push({ x: p.x, y: p.y });
-  };
-  const addPoint = p => {
-    if (Math.abs(p.y) < EPS) pushUnique(sides.top, p);
-    if (Math.abs(p.y - H) < EPS) pushUnique(sides.bottom, p);
-    if (Math.abs(p.x) < EPS) pushUnique(sides.left, p);
-    if (Math.abs(p.x - W) < EPS) pushUnique(sides.right, p);
-  };
-  addPoint({ x: 0, y: 0 }); addPoint({ x: W, y: 0 }); addPoint({ x: W, y: H }); addPoint({ x: 0, y: H });
-  for (const c of state.curves) { addPoint(c.p0); addPoint(c.p3); }
-
-  sides.top.sort((a, b) => a.x - b.x);
-  sides.right.sort((a, b) => a.y - b.y);
-  sides.bottom.sort((a, b) => b.x - a.x);
-  sides.left.sort((a, b) => b.y - a.y);
-
-  const mkSeg = (p0, p3) => ({
-    id: `border:${fmt(p0.x)},${fmt(p0.y)}-${fmt(p3.x)},${fmt(p3.y)}`,
-    isBorder: true, p0,
-    c1: { x: lerp(p0.x, p3.x, 1/3), y: lerp(p0.y, p3.y, 1/3) },
-    c2: { x: lerp(p0.x, p3.x, 2/3), y: lerp(p0.y, p3.y, 2/3) },
-    p3, width: borderWidth, color: borderColor,
-  });
-  const segs = [];
-  const emit = pts => { for (let i = 0; i < pts.length - 1; i++) segs.push(mkSeg(pts[i], pts[i + 1])); };
-  emit(sides.top); emit(sides.right); emit(sides.bottom); emit(sides.left);
-  return segs;
-}
-
-/* ---------------------------------------------------------------------- */
-/* Planar face detection                                                   */
-/* ---------------------------------------------------------------------- */
-
-class UnionFind {
-  constructor() { this.parent = new Map(); }
-  find(x) {
-    if (!this.parent.has(x)) this.parent.set(x, x);
-    let root = x;
-    while (this.parent.get(root) !== root) root = this.parent.get(root);
-    while (this.parent.get(x) !== root) { const next = this.parent.get(x); this.parent.set(x, root); x = next; }
-    return root;
-  }
-  union(a, b) {
-    const ra = this.find(a), rb = this.find(b);
-    if (ra !== rb) this.parent.set(ra, rb);
-  }
-}
-
-function buildFaces(curves) {
-  const outgoing = new Map(); // vkey -> halfedge[]
-  const halfEdges = [];
-  const uf = new UnionFind();
-  const curvesById = {};
-
-  for (const c of curves) {
-    curvesById[c.id] = c;
-    const kf = vkey(c.p0), kt = vkey(c.p3);
-    uf.union(kf, kt);
-
-    const flatF = flattenCubic(c.p0, c.c1, c.c2, c.p3, FLATTEN_SEGMENTS);
-    const flatB = flatF.slice().reverse();
-    const angF = departureAngle(c.p0, c.c1, c.c2, c.p3);
-    const angB = departureAngle(c.p3, c.c2, c.c1, c.p0);
-
-    const heF = { curveId: c.id, dir: "f", from: c.p0, to: c.p3, angle: angF, flat: flatF };
-    const heB = { curveId: c.id, dir: "b", from: c.p3, to: c.p0, angle: angB, flat: flatB };
-    heF.twin = heB; heB.twin = heF;
-    halfEdges.push(heF, heB);
-
-    if (!outgoing.has(kf)) outgoing.set(kf, []);
-    outgoing.get(kf).push(heF);
-    if (!outgoing.has(kt)) outgoing.set(kt, []);
-    outgoing.get(kt).push(heB);
-  }
-
-  for (const list of outgoing.values()) list.sort((a, b) => a.angle - b.angle);
-
-  for (const he of halfEdges) {
-    const list = outgoing.get(vkey(he.to));
-    const idx = list.indexOf(he.twin);
-    const prevIdx = (idx - 1 + list.length) % list.length;
-    he.next = list[prevIdx];
-  }
-
-  const visited = new Set();
-  const cycles = [];
-  for (const he of halfEdges) {
-    if (visited.has(he)) continue;
-    const cycle = [];
-    let cur = he;
-    let guard = 0;
-    do {
-      visited.add(cur);
-      cycle.push(cur);
-      cur = cur.next;
-      guard++;
-    } while (cur !== he && guard < halfEdges.length + 5);
-    cycles.push(cycle);
-  }
-
-  // group by connected component
-  const byComponent = new Map();
-  for (const cycle of cycles) {
-    const comp = uf.find(vkey(cycle[0].from));
-    if (!byComponent.has(comp)) byComponent.set(comp, []);
-    byComponent.get(comp).push(cycle);
-  }
-
-  const boundedFaces = [];
-  const silhouettes = []; // one unbounded trace per component
-
-  for (const [comp, compCycles] of byComponent) {
-    let unbounded = null, unboundedArea = 0;
-    const bounded = [];
-    for (const cycle of compCycles) {
-      const flat = [];
-      for (const he of cycle) {
-        for (let i = 0; i < he.flat.length - 1; i++) flat.push(he.flat[i]);
-      }
-      const area = shoelaceArea(flat);
-      if (area > 1e-6) {
-        bounded.push({ cycle, flat, area, curveIds: new Set(cycle.map(h => h.curveId)), component: comp });
-      } else if (unbounded === null || Math.abs(area) > Math.abs(unboundedArea)) {
-        if (unbounded !== null) bounded.push(unbounded); // shouldn't normally happen, keep as bounded fallback
-        unbounded = { cycle, flat, area, curveIds: new Set(cycle.map(h => h.curveId)), component: comp };
-        unboundedArea = area;
-      }
-    }
-    boundedFaces.push(...bounded);
-    if (unbounded) silhouettes.push({ ...unbounded, component: comp });
-  }
-
-  // assign holes: each silhouette nests inside the smallest bounded face (from a DIFFERENT
-  // component) that contains it. A face can never be its own silhouette's container: the
-  // silhouette's own vertices sit exactly on that face's boundary, which point-in-polygon
-  // can misjudge as "inside" for degenerate/vertex-touching rays.
-  for (const face of boundedFaces) face.holes = [];
-  for (const sil of silhouettes) {
-    const testPt = sil.flat[0];
-    let best = null, bestArea = Infinity;
-    for (const face of boundedFaces) {
-      if (face.component === sil.component) continue;
-      if (pointInPolygon(testPt, face.flat) && face.area < bestArea) {
-        best = face; bestArea = face.area;
-      }
-    }
-    if (best) {
-      best.holes.push(sil);
-      for (const id of sil.curveIds) best.curveIds.add(id);
-    }
-  }
-
-  const faces = boundedFaces.map(f => {
-    const ids = Array.from(f.curveIds).sort();
-    return {
-      signature: ids.join(","),
-      cycle: f.cycle,
-      outerFlat: f.flat,
-      holes: f.holes.map(h => ({ cycle: h.cycle, flat: h.flat })),
-      area: f.area,
-    };
-  });
-
-  return { faces, curvesById };
-}
-
-function cubicPathFromCycle(cycle, curvesById) {
-  let d = `M ${fmt(cycle[0].from.x)} ${fmt(cycle[0].from.y)}`;
-  for (const he of cycle) {
-    const c = curvesById[he.curveId];
-    if (he.dir === "f") {
-      d += ` C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
-    } else {
-      d += ` C ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.p0.x)} ${fmt(c.p0.y)}`;
-    }
-  }
-  d += " Z";
-  return d;
+  return `<rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="${borderColor}" stroke-width="${borderWidth}"></rect>`;
 }
 
 function fmt(n) { return Math.round(n * 100) / 100; }
-
-function recomputeFaces() {
-  const prevFaces = facesCache;
-  const rawCurves = state.curves.concat(computeBorderSegments());
-  const { faces, curvesById } = buildFaces(splitCurvesAtIntersections(rawCurves));
-
-  for (const face of faces) {
-    if (state.faceStyles[face.signature]) continue;
-    // topology changed here: find which previous face contained this new one, inherit its style
-    const sample = interiorSamplePoint(face);
-    let inherited = null;
-    for (const pf of prevFaces) {
-      if (pointInFace(sample, pf)) { inherited = state.faceStyles[pf.signature]; break; }
-    }
-    state.faceStyles[face.signature] = inherited
-      ? JSON.parse(JSON.stringify(inherited))
-      : { type: "solid", color: "#e9edf5" };
-  }
-
-  // prune unused signatures
-  const live = new Set(faces.map(f => f.signature));
-  for (const sig of Object.keys(state.faceStyles)) {
-    if (!live.has(sig)) delete state.faceStyles[sig];
-  }
-
-  faces.curvesById = curvesById;
-  facesCache = faces;
-  facesCache.curvesById = curvesById;
-}
-
-function interiorSamplePoint(face) {
-  // average of outer contour points, nudged toward an edge midpoint if it lands in a hole
-  let sx = 0, sy = 0;
-  for (const p of face.outerFlat) { sx += p.x; sy += p.y; }
-  let pt = { x: sx / face.outerFlat.length, y: sy / face.outerFlat.length };
-  if (pointInFace(pt, face)) return pt;
-  // fallback: try midpoints between centroid and each outer vertex
-  for (const p of face.outerFlat) {
-    const mid = { x: (pt.x + p.x) / 2, y: (pt.y + p.y) / 2 };
-    if (pointInFace(mid, face)) return mid;
-  }
-  return face.outerFlat[0];
-}
 
 /* ---------------------------------------------------------------------- */
 /* Rendering                                                               */
 /* ---------------------------------------------------------------------- */
 
 const svg = document.getElementById("stage");
-let gridLayer, facesLayer, curvesLayer, selectionLayer, handlesLayer, previewLayer, defsLayer;
+let gridLayer, curvesLayer, handlesLayer, previewLayer, defsLayer;
 
-// Stacking order matters: fills, then curve strokes, then the grid (on top so
-// toggling it is actually visible over any fill/curve instead of being buried
-// under the opaque face fills), then the selection highlight (always above
-// the curves that bound a face, so it can't be hidden underneath them), then
-// the draggable handles, then the hover-only draw preview on top of all of it.
+// Stacking order matters: curve strokes, then the grid (on top so toggling
+// it is actually visible over any curve instead of being buried under it),
+// then the draggable handles, then the hover-only draw preview on top of
+// all of it.
 function ensureLayers() {
   svg.innerHTML = "";
   defsLayer = document.createElementNS(SVGNS, "defs");
-  facesLayer = document.createElementNS(SVGNS, "g");
-  facesLayer.setAttribute("id", "layer-faces");
   curvesLayer = document.createElementNS(SVGNS, "g");
   curvesLayer.setAttribute("id", "layer-curves");
   gridLayer = document.createElementNS(SVGNS, "g");
   gridLayer.setAttribute("id", "layer-grid");
   gridLayer.style.pointerEvents = "none";
-  selectionLayer = document.createElementNS(SVGNS, "g");
-  selectionLayer.setAttribute("id", "layer-selection");
-  selectionLayer.style.pointerEvents = "none";
   handlesLayer = document.createElementNS(SVGNS, "g");
   handlesLayer.setAttribute("id", "layer-handles");
   previewLayer = document.createElementNS(SVGNS, "g");
   previewLayer.setAttribute("id", "layer-preview");
   previewLayer.style.pointerEvents = "none";
   svg.appendChild(defsLayer);
-  svg.appendChild(facesLayer);
   svg.appendChild(curvesLayer);
   svg.appendChild(gridLayer);
-  svg.appendChild(selectionLayer);
   svg.appendChild(handlesLayer);
   svg.appendChild(previewLayer);
 }
-
-function gradientId(sig) {
-  return "grad-" + sig.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 80) + "-" + hashStr(sig);
-}
-function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
 
 function gradientVector(angleDeg) {
   const rad = (angleDeg % 360) * Math.PI / 180;
   const dx = Math.cos(rad), dy = Math.sin(rad);
   return { x1: 0.5 - dx * 0.5, y1: 0.5 - dy * 0.5, x2: 0.5 + dx * 0.5, y2: 0.5 + dy * 0.5 };
-}
-
-function buildDefsAndFaceMarkup(faces, curvesById) {
-  let defs = "";
-  let body = "";
-  for (const face of faces) {
-    const style = state.faceStyles[face.signature] || { type: "solid", color: "#e9edf5" };
-    const d = cubicPathFromCycle(face.cycle, curvesById) + " " +
-      face.holes.map(h => cubicPathFromCycle(h.cycle, curvesById)).join(" ");
-    let fillAttr;
-    if (style.type === "gradient") {
-      const gid = gradientId(face.signature);
-      const v = gradientVector(style.angle || 0);
-      defs += `<linearGradient id="${gid}" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
-        `<stop offset="0%" stop-color="${style.color1}"/>` +
-        `<stop offset="100%" stop-color="${style.color2}"/>` +
-        `</linearGradient>`;
-      fillAttr = `url(#${gid})`;
-    } else {
-      fillAttr = style.color;
-    }
-    body += `<path d="${d}" fill="${fillAttr}" fill-rule="evenodd" data-signature="${escapeAttr(face.signature)}"></path>`;
-  }
-  return { defs, body };
 }
 
 function escapeAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
@@ -872,34 +449,6 @@ function curvesMarkup(curves, includeSelection = true) {
   return { defs, body: glowBody + body };
 }
 
-// Selected-face highlight: drawn in its own layer above the curve strokes so
-// it can never be hidden underneath the very curves that bound the face. No
-// flat fill/stroke color can be relied on to contrast an arbitrary
-// user-chosen fill, so this doesn't try to pick one: classic two-tone
-// marching ants, black and white dashes alternating and animated together.
-// (An earlier version used a single white stroke with
-// mix-blend-mode:difference to invert whatever's underneath, same trick
-// renderGrid uses below - but the grid layer *also* difference-blends white
-// over the canvas, and invert(invert(x)) === x, so wherever this editor's
-// grid-snapped curves sit on a grid line - i.e. almost always - the two
-// inversions exactly cancelled and the ants vanished. Two fixed, non-blended
-// colors sidesteps that.)
-function selectionOverlayMarkup(curvesById) {
-  if (!state.selection || state.selection.type !== "face") return "";
-  const face = facesCache.find(f => f.signature === state.selection.signature);
-  if (!face) return "";
-  const d = cubicPathFromCycle(face.cycle, curvesById) + " " +
-    face.holes.map(h => cubicPathFromCycle(h.cycle, curvesById)).join(" ");
-  const s = currentScale();
-  const dash = 8 / s, w = 2 / s;
-  return `<path d="${d}" fill="none" stroke="#000000" stroke-width="${w}" stroke-dasharray="${dash},${dash}">` +
-    `<animate attributeName="stroke-dashoffset" from="${dash * 2}" to="0" dur="0.5s" repeatCount="indefinite"/>` +
-    `</path>` +
-    `<path d="${d}" fill="none" stroke="#ffffff" stroke-width="${w}" stroke-dasharray="${dash},${dash}" stroke-dashoffset="${dash}">` +
-    `<animate attributeName="stroke-dashoffset" from="${dash * 3}" to="${dash}" dur="0.5s" repeatCount="indefinite"/>` +
-    `</path>`;
-}
-
 function currentScale() {
   const rect = svg.getBoundingClientRect();
   if (!rect.width) return 1;
@@ -981,14 +530,9 @@ function renderCanvas() {
   if (!gridLayer) ensureLayers();
   renderGrid();
 
-  const { defs, body } = buildDefsAndFaceMarkup(facesCache, facesCache.curvesById || {});
   const curveA = curvesMarkup(state.curves);
-  const curveB = curvesMarkup(computeBorderSegments());
-  defsLayer.innerHTML = defs + curveA.defs + curveB.defs;
-  facesLayer.innerHTML = body;
-
-  curvesLayer.innerHTML = curveA.body + curveB.body;
-  selectionLayer.innerHTML = selectionOverlayMarkup(facesCache.curvesById || {});
+  defsLayer.innerHTML = curveA.defs;
+  curvesLayer.innerHTML = curveA.body + borderMarkup();
 
   renderHandles();
 }
@@ -1019,10 +563,6 @@ function usedColors() {
   for (const c of state.curves) {
     add(c.color);
     if (c.colorMode === "gradient") add(c.color2);
-  }
-  for (const sig of Object.keys(state.faceStyles)) {
-    const s = state.faceStyles[sig];
-    if (s.type === "gradient") { add(s.color1); add(s.color2); } else { add(s.color); }
   }
   return order;
 }
@@ -1063,18 +603,13 @@ function renderPanel() {
   if (state.tool === "page") { renderPagePanel(); return; }
   if (state.tool === "grid") { renderGridPanel(); return; }
   if (!state.selection) {
-    const msg = state.tool === "surface"
-      ? "Nothing selected.<br>Click inside a region to select its surface."
-      : "Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.";
-    panel.innerHTML = `<div class="panel-empty">${msg}</div>`;
+    panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.</div>`;
     return;
   }
   if (state.selection.type === "curve") {
     renderCurvePanel();
-  } else if (state.selection.type === "curves") {
-    renderMultiCurvePanel();
   } else {
-    renderFacePanel();
+    renderMultiCurvePanel();
   }
 }
 
@@ -1142,7 +677,6 @@ function renderMultiCurvePanel() {
     const idSet = new Set(ids);
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
     state.selection = null;
-    recomputeFaces();
     render();
     pushHistory();
   });
@@ -1167,7 +701,6 @@ function renderPagePanel() {
     state.grid.height = h;
     state.grid.borderColor = document.getElementById("p-bcolor").value;
     state.grid.borderWidth = parseFloat(document.getElementById("p-bwidth").value) || 0;
-    recomputeFaces();
     render();
     pushHistory();
   };
@@ -1469,7 +1002,6 @@ function renderCurvePanel() {
   document.getElementById("f-mirror").addEventListener("click", () => {
     const mirrored = mirrorCurve(c);
     state.curves.push(mirrored);
-    recomputeFaces();
     setSelection({ type: "curve", id: mirrored.id });
     pushHistory();
   });
@@ -1477,7 +1009,6 @@ function renderCurvePanel() {
   document.getElementById("f-mirror-h").addEventListener("click", () => {
     const mirrored = mirrorCurveHorizontalAxis(c);
     state.curves.push(mirrored);
-    recomputeFaces();
     setSelection({ type: "curve", id: mirrored.id });
     pushHistory();
   });
@@ -1485,7 +1016,6 @@ function renderCurvePanel() {
   document.getElementById("f-mirror-v").addEventListener("click", () => {
     const mirrored = mirrorCurveVerticalAxis(c);
     state.curves.push(mirrored);
-    recomputeFaces();
     setSelection({ type: "curve", id: mirrored.id });
     pushHistory();
   });
@@ -1493,123 +1023,8 @@ function renderCurvePanel() {
   document.getElementById("f-delete").addEventListener("click", () => {
     state.curves = state.curves.filter(cv => cv.id !== c.id);
     state.selection = null;
-    recomputeFaces();
     render();
     pushHistory();
-  });
-}
-
-function renderFacePanel() {
-  const face = facesCache.find(f => f.signature === state.selection.signature);
-  if (!face) { state.selection = null; renderPanel(); return; }
-  const style = state.faceStyles[face.signature] || { type: "solid", color: "#e9edf5" };
-  const isGrad = style.type === "gradient";
-  panel.innerHTML = `
-    <div class="panel-section">
-      <div class="seg">
-        <button id="f-solid" class="${!isGrad ? "active" : ""}">Solid</button>
-        <button id="f-grad" class="${isGrad ? "active" : ""}">Gradient</button>
-      </div>
-      <div id="fill-fields"></div>
-    </div>
-  `;
-  const fields = document.getElementById("fill-fields");
-
-  function paintSolid() {
-    const s = state.faceStyles[face.signature];
-    fields.innerHTML = `
-      <div class="field-row">
-        <label>Color</label>
-        <input type="color" id="f-scolor" value="${s.color}">
-      </div>
-      ${swatchesMarkup()}
-    `;
-    document.getElementById("f-scolor").addEventListener("input", e => {
-      s.color = e.target.value;
-      renderCanvas();
-    });
-    document.getElementById("f-scolor").addEventListener("change", () => pushHistory());
-    wireSwatches(fields, document.getElementById("f-scolor"));
-  }
-
-  function paintGradient() {
-    const s = state.faceStyles[face.signature];
-    fields.innerHTML = `
-      <div class="gradient-preview" id="f-gpreview"></div>
-      <div class="field-row">
-        <label>Start</label>
-        <input type="color" id="f-g1" value="${s.color1}">
-      </div>
-      ${swatchesMarkup()}
-      <div class="field-row">
-        <label>End</label>
-        <input type="color" id="f-g2" value="${s.color2}">
-      </div>
-      ${swatchesMarkup()}
-      <div class="field-row">
-        <label>Angle</label>
-        <input type="range" id="f-gangle" min="0" max="359" step="1" value="${s.angle}">
-        <input type="number" class="num-in" id="f-gangle-num" min="0" max="359" step="1" value="${s.angle}">
-        <span class="unit">&deg;</span>
-      </div>
-    `;
-    const updatePreview = () => {
-      const el = document.getElementById("f-gpreview");
-      el.style.background = `linear-gradient(${s.angle}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
-    };
-    updatePreview();
-    document.getElementById("f-g1").addEventListener("input", e => {
-      s.color1 = e.target.value;
-      updatePreview(); renderCanvas();
-    });
-    document.getElementById("f-g1").addEventListener("change", () => pushHistory());
-    document.getElementById("f-g2").addEventListener("input", e => {
-      s.color2 = e.target.value;
-      updatePreview(); renderCanvas();
-    });
-    document.getElementById("f-g2").addEventListener("change", () => pushHistory());
-    const swatchBlocks = fields.querySelectorAll(".swatches");
-    wireSwatches(swatchBlocks[0], document.getElementById("f-g1"));
-    wireSwatches(swatchBlocks[1], document.getElementById("f-g2"));
-    // Same live-update/panel-decoupling as the width gauge above: only
-    // renderCanvas(), never a full render(), while the value is still changing.
-    const angleInput = document.getElementById("f-gangle");
-    const angleNum = document.getElementById("f-gangle-num");
-    angleInput.addEventListener("input", e => {
-      s.angle = parseInt(e.target.value, 10);
-      angleNum.value = s.angle;
-      updatePreview(); renderCanvas();
-    });
-    angleInput.addEventListener("change", () => pushHistory());
-    angleNum.addEventListener("input", e => {
-      const v = parseInt(e.target.value, 10);
-      if (!Number.isFinite(v)) return;
-      s.angle = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-    });
-    angleNum.addEventListener("change", e => {
-      const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
-      s.angle = v;
-      e.target.value = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-      pushHistory();
-    });
-  }
-
-  if (isGrad) paintGradient(); else paintSolid();
-
-  document.getElementById("f-solid").addEventListener("click", () => {
-    if (state.faceStyles[face.signature].type === "solid") return;
-    state.faceStyles[face.signature] = { type: "solid", color: "#e9edf5" };
-    renderFacePanel(); render(); pushHistory();
-  });
-  document.getElementById("f-grad").addEventListener("click", () => {
-    if (state.faceStyles[face.signature].type === "gradient") return;
-    const cur = state.faceStyles[face.signature];
-    state.faceStyles[face.signature] = { type: "gradient", color1: cur.color || "#e9edf5", color2: "#5b8cff", angle: 90 };
-    renderFacePanel(); render(); pushHistory();
   });
 }
 
@@ -1656,13 +1071,6 @@ function hitTestCurve(pt) {
     if (d < bestD) { bestD = d; best = c; }
   }
   return best;
-}
-
-function hitTestFace(pt) {
-  for (const f of facesCache) {
-    if (pointInFace(pt, f)) return f;
-  }
-  return null;
 }
 
 function hitTestHandle(evt) {
@@ -1781,17 +1189,6 @@ function onStageMouseDown(evt) {
 
   if (state.tool === "page" || state.tool === "grid") return;
 
-  if (state.tool === "surface") {
-    const pt = toSvgPoint(evt);
-    const faceHit = hitTestFace(pt);
-    if (faceHit) {
-      setSelection({ type: "face", signature: faceHit.signature });
-    } else {
-      setSelection(null);
-    }
-    return;
-  }
-
   // curve tool: selecting/dragging existing curves takes priority over
   // starting a new one, except while a draw is already in progress, where
   // the click always finishes/connects it (never reinterpreted as a select).
@@ -1803,7 +1200,6 @@ function onStageMouseDown(evt) {
     state.curves.push(curve);
     drawPending = null;
     hideHint();
-    recomputeFaces();
     setSelection({ type: "curve", id });
     pushHistory();
     return;
@@ -1883,7 +1279,7 @@ function onWindowMouseMove(evt) {
       c.p3 = { x: o.p3.x + dx, y: o.p3.y + dy };
     });
     renderHandles();
-    curvesLayer.innerHTML = curvesMarkup(state.curves).body + curvesMarkup(computeBorderSegments()).body;
+    curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
     return;
   }
   const raw = toSvgPoint(evt);
@@ -1892,7 +1288,7 @@ function onWindowMouseMove(evt) {
   const p = near || snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
   dragCtx.curve[dragCtx.key] = p;
   renderHandles();
-  curvesLayer.innerHTML = curvesMarkup(state.curves).body + curvesMarkup(computeBorderSegments()).body;
+  curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
 }
 
 function onWindowMouseUp() {
@@ -1908,7 +1304,6 @@ function onWindowMouseUp() {
   window.removeEventListener("mouseup", onWindowMouseUp);
   if (state.tool === "curve") svg.style.cursor = "default";
   if (wasNoOpCurveDrag) return;
-  recomputeFaces();
   render();
   pushHistory();
 }
@@ -1941,9 +1336,6 @@ function onStageMouseMove(evt) {
       `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
     return;
   }
-  if (state.tool === "surface" && !dragCtx) {
-    svg.style.cursor = hitTestFace(toSvgPoint(evt)) ? "pointer" : "default";
-  }
   previewLayer.innerHTML = "";
 }
 
@@ -1956,12 +1348,9 @@ function setTool(tool) {
   document.getElementById("tool-page").classList.toggle("active", tool === "page");
   document.getElementById("tool-grid").classList.toggle("active", tool === "grid");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
-  document.getElementById("tool-surface").classList.toggle("active", tool === "surface");
   svg.style.cursor = "default";
   if (tool === "curve") {
     showHint("Click an existing curve to select it, or an empty grid point to draw a new one.", true);
-  } else if (tool === "surface") {
-    showHint("Click inside a region to select its surface.", true);
   }
   render();
 }
@@ -1969,7 +1358,6 @@ function setTool(tool) {
 document.getElementById("tool-page").addEventListener("click", () => setTool("page"));
 document.getElementById("tool-grid").addEventListener("click", () => setTool("grid"));
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
-document.getElementById("tool-surface").addEventListener("click", () => setTool("surface"));
 
 document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
@@ -1981,7 +1369,7 @@ document.addEventListener("keydown", evt => {
     const idSet = new Set(state.selection.type === "curve" ? [state.selection.id] : state.selection.ids);
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
     state.selection = null;
-    recomputeFaces(); render(); pushHistory();
+    render(); pushHistory();
   } else if ((evt.key === "]" || evt.key === "}") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
       state.selection && (state.selection.type === "curve" || state.selection.type === "curves")) {
     reorderSelection(evt.shiftKey || evt.key === "}" ? "front" : "forward");
@@ -1990,8 +1378,6 @@ document.addEventListener("keydown", evt => {
     reorderSelection(evt.shiftKey || evt.key === "{" ? "back" : "backward");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("curve");
-  } else if (evt.key.toLowerCase() === "s" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
-    setTool("surface");
   } else if (evt.key.toLowerCase() === "p" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("page");
   } else if (evt.key.toLowerCase() === "g" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
@@ -2058,14 +1444,11 @@ document.getElementById("load-btn").addEventListener("click", loadFromLocalStora
 
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
-  const { defs, body } = buildDefsAndFaceMarkup(facesCache, facesCache.curvesById || {});
   const curveA = curvesMarkup(state.curves, false);
-  const curveB = curvesMarkup(computeBorderSegments(), false);
-  const curves = curveA.body + curveB.body;
+  const curves = curveA.body + borderMarkup();
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +
-    `<defs>${defs}${curveA.defs}${curveB.defs}</defs>\n` +
-    `<g id="surfaces">${body}</g>\n` +
+    `<defs>${curveA.defs}</defs>\n` +
     `<g id="curves">${curves}</g>\n` +
     `</svg>\n`;
 }
@@ -2089,7 +1472,6 @@ document.getElementById("export-btn").addEventListener("click", () => {
 
 function init() {
   ensureLayers();
-  recomputeFaces();
   pushHistory();
   setTool("curve");
   fitToScreen();
@@ -2100,8 +1482,7 @@ function init() {
 // test harness, inspect and drive internal state directly.
 if (typeof window !== "undefined") {
   window.__coeurf = {
-    state, computeBorderSegments, buildFaces, splitCurvesAtIntersections, recomputeFaces, getFaces: () => facesCache,
-    interiorSamplePoint, undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
+    state, undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
   };
 }
 
