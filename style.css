@@ -247,6 +247,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   gap: var(--sp-2);
 }
+.action-row + .action-row {
+  margin-top: var(--sp-2);
+}
 .icon-btn {
   flex: 1;
   display: flex;

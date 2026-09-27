@@ -1082,6 +1082,41 @@ function renderPanel() {
 // move (via drag, handled in the pointer handlers) and delete - editing
 // per-curve properties (color, width, ...) for a mixed group has no single
 // obvious value to show, so that's left to single-curve selection for now.
+// Moves the selected curve(s) within state.curves, which doubles as their
+// paint order (see curvesMarkup) - later entries draw on top. "forward" and
+// "backward" swap each selected curve past its one non-selected neighbor on
+// that side, processing from the topmost/bottommost index inward so a
+// contiguous selection moves as a single block instead of interleaving.
+function reorderSelection(direction) {
+  if (!state.selection) return;
+  const ids = state.selection.type === "curve" ? [state.selection.id]
+    : state.selection.type === "curves" ? state.selection.ids
+    : null;
+  if (!ids || !ids.length) return;
+  const idSet = new Set(ids);
+  const curves = state.curves;
+
+  if (direction === "front" || direction === "back") {
+    const selected = curves.filter(c => idSet.has(c.id));
+    const rest = curves.filter(c => !idSet.has(c.id));
+    state.curves = direction === "front" ? rest.concat(selected) : selected.concat(rest);
+  } else if (direction === "forward") {
+    for (let i = curves.length - 2; i >= 0; i--) {
+      if (idSet.has(curves[i].id) && !idSet.has(curves[i + 1].id)) {
+        [curves[i], curves[i + 1]] = [curves[i + 1], curves[i]];
+      }
+    }
+  } else if (direction === "backward") {
+    for (let i = 1; i < curves.length; i++) {
+      if (idSet.has(curves[i].id) && !idSet.has(curves[i - 1].id)) {
+        [curves[i - 1], curves[i]] = [curves[i], curves[i - 1]];
+      }
+    }
+  }
+  renderCanvas();
+  pushHistory();
+}
+
 function renderMultiCurvePanel() {
   const ids = state.selection.ids;
   const count = ids.filter(id => state.curves.some(cv => cv.id === id)).length;
@@ -1089,10 +1124,20 @@ function renderMultiCurvePanel() {
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
     <div class="panel-section" style="margin-top:16px">
       <div class="action-row">
+        <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
+        <button class="icon-btn" id="f-forward-multi" title="Bring forward (])">${ICON_FORWARD}</button>
+        <button class="icon-btn" id="f-backward-multi" title="Send backward ([)">${ICON_BACKWARD}</button>
+        <button class="icon-btn" id="f-to-back-multi" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
+      </div>
+      <div class="action-row">
         <button class="icon-btn danger" id="f-delete-multi" title="Delete all selected curves permanently.">${ICON_TRASH}</button>
       </div>
     </div>
   `;
+  document.getElementById("f-to-front-multi").addEventListener("click", () => reorderSelection("front"));
+  document.getElementById("f-forward-multi").addEventListener("click", () => reorderSelection("forward"));
+  document.getElementById("f-backward-multi").addEventListener("click", () => reorderSelection("backward"));
+  document.getElementById("f-to-back-multi").addEventListener("click", () => reorderSelection("back"));
   document.getElementById("f-delete-multi").addEventListener("click", () => {
     const idSet = new Set(ids);
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
@@ -1173,6 +1218,10 @@ const ICON_MIRROR_SELF = `<svg ${ICON_ATTRS}><path d="M4 12c4-7 12-7 16 0"/><pat
 const ICON_FLIP_V = `<svg ${ICON_ATTRS}><line x1="3" y1="12" x2="21" y2="12" stroke-dasharray="2.5 2.5"/><path d="M12 3l-4 4M12 3l4 4"/><path d="M12 21l-4-4M12 21l4-4"/></svg>`;
 const ICON_FLIP_H = `<svg ${ICON_ATTRS}><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/><path d="M3 12l4-4M3 12l4 4"/><path d="M21 12l-4-4M21 12l-4 4"/></svg>`;
 const ICON_TRASH = `<svg ${ICON_ATTRS}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>`;
+const ICON_TO_FRONT = `<svg ${ICON_ATTRS}><path d="M6 17l6-6 6 6"/><path d="M6 10l6-6 6 6"/></svg>`;
+const ICON_FORWARD = `<svg ${ICON_ATTRS}><path d="M6 15l6-6 6 6"/></svg>`;
+const ICON_BACKWARD = `<svg ${ICON_ATTRS}><path d="M6 9l6 6 6-6"/></svg>`;
+const ICON_TO_BACK = `<svg ${ICON_ATTRS}><path d="M6 7l6 6 6-6"/><path d="M6 14l6 6 6-6"/></svg>`;
 
 function renderCurvePanel() {
   const c = state.curves.find(cv => cv.id === state.selection.id);
@@ -1201,6 +1250,12 @@ function renderCurvePanel() {
     <div class="panel-section">
       <h3>Actions</h3>
       <div class="action-row">
+        <button class="icon-btn" id="f-to-front" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
+        <button class="icon-btn" id="f-forward" title="Bring forward (])">${ICON_FORWARD}</button>
+        <button class="icon-btn" id="f-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
+        <button class="icon-btn" id="f-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
+      </div>
+      <div class="action-row">
         <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
         <button class="icon-btn" id="f-mirror-h" title="Mirror horizontal axis: add a new curve flipped top-to-bottom across the page's horizontal centerline.">${ICON_FLIP_V}</button>
         <button class="icon-btn" id="f-mirror-v" title="Mirror vertical axis: add a new curve flipped left-to-right across the page's vertical centerline.">${ICON_FLIP_H}</button>
@@ -1208,6 +1263,10 @@ function renderCurvePanel() {
       </div>
     </div>
   `;
+  document.getElementById("f-to-front").addEventListener("click", () => reorderSelection("front"));
+  document.getElementById("f-forward").addEventListener("click", () => reorderSelection("forward"));
+  document.getElementById("f-backward").addEventListener("click", () => reorderSelection("backward"));
+  document.getElementById("f-to-back").addEventListener("click", () => reorderSelection("back"));
 
   const colorFields = document.getElementById("color-fields");
 
@@ -1923,6 +1982,12 @@ document.addEventListener("keydown", evt => {
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
     state.selection = null;
     recomputeFaces(); render(); pushHistory();
+  } else if ((evt.key === "]" || evt.key === "}") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
+      state.selection && (state.selection.type === "curve" || state.selection.type === "curves")) {
+    reorderSelection(evt.shiftKey || evt.key === "}" ? "front" : "forward");
+  } else if ((evt.key === "[" || evt.key === "{") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
+      state.selection && (state.selection.type === "curve" || state.selection.type === "curves")) {
+    reorderSelection(evt.shiftKey || evt.key === "{" ? "back" : "backward");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("curve");
   } else if (evt.key.toLowerCase() === "s" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
