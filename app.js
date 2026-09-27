@@ -238,15 +238,50 @@ function loadFromLocalStorage() {
   let raw;
   try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { raw = null; }
   if (!raw) { showHint("No saved design found."); return; }
+  if (!restoreFromJSON(raw)) showHint("Saved data is corrupted and could not be loaded.");
+  else showHint("Design loaded.");
+}
+
+// Parses `raw` as a design snapshot and, if valid, restores it and records
+// history. Shared by localStorage load and file import. Returns whether it
+// was valid.
+function restoreFromJSON(raw) {
   let snap;
   try { snap = JSON.parse(raw); } catch (e) { snap = null; }
-  if (!snap || !snap.grid || !Array.isArray(snap.curves)) {
-    showHint("Saved data is corrupted and could not be loaded.");
-    return;
-  }
+  if (!snap || !snap.grid || !Array.isArray(snap.curves)) return false;
   restoreFromSnapshot(snap);
   pushHistory();
-  showHint("Design loaded.");
+  return true;
+}
+
+function timestampForFilename() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+
+function downloadDesign() {
+  const json = JSON.stringify(cloneState(), null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `coeurf-${timestampForFilename()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showHint("Design downloaded.");
+}
+
+function importDesignFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (!restoreFromJSON(String(reader.result))) showHint("Imported file is invalid and could not be loaded.");
+    else showHint("Design imported.");
+  };
+  reader.onerror = () => showHint("Could not read file.");
+  reader.readAsText(file);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1605,6 +1640,13 @@ document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
 document.getElementById("save-btn").addEventListener("click", saveToLocalStorage);
 document.getElementById("load-btn").addEventListener("click", loadFromLocalStorage);
+document.getElementById("download-btn").addEventListener("click", downloadDesign);
+document.getElementById("import-btn").addEventListener("click", () => document.getElementById("import-input").click());
+document.getElementById("import-input").addEventListener("change", evt => {
+  const file = evt.target.files[0];
+  if (file) importDesignFromFile(file);
+  evt.target.value = "";
+});
 
 /* ---------------------------------------------------------------------- */
 /* Export                                                                   */
@@ -1651,6 +1693,7 @@ function init() {
 if (typeof window !== "undefined") {
   window.__coeurf = {
     state, undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
+    downloadDesign, importDesignFromFile,
   };
 }
 
