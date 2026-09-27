@@ -220,7 +220,7 @@ const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   curves: [],        // {id, isBorder, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
   faceStyles: {},     // signature -> {type:'solid', color} | {type:'gradient', color1, color2, angle}
-  selection: null,    // {type:'curve', id} | {type:'face', signature}
+  selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'face', signature}
   tool: "curve",      // "page" | "grid" | "curve" | "surface"
   curveIdCounter: 1,
 };
@@ -809,12 +809,21 @@ const SELECTION_GLOW_COLOR = "#5b8cff";
 const SELECTION_GLOW_OPACITY = 0.55;
 const SELECTION_GLOW_EXTRA_WIDTH = 5;
 
+// True when curve `id` is part of the current selection, whether that's a
+// single-curve selection or a Shift-click multi-selection.
+function isCurveSelected(id) {
+  if (!state.selection) return false;
+  if (state.selection.type === "curve") return state.selection.id === id;
+  if (state.selection.type === "curves") return state.selection.ids.includes(id);
+  return false;
+}
+
 function curvesMarkup(curves, includeSelection = true) {
   let defs = CURVE_GLOW_FILTER;
   let glowBody = "";
   let body = "";
   for (const c of curves) {
-    const selected = includeSelection && state.selection && state.selection.type === "curve" && state.selection.id === c.id;
+    const selected = includeSelection && isCurveSelected(c.id);
     const w0 = c.width;
     const w1 = c.width2 != null ? c.width2 : c.width;
     // The ribbon path is what carries the "drift" bulge (see
@@ -1062,9 +1071,36 @@ function renderPanel() {
   }
   if (state.selection.type === "curve") {
     renderCurvePanel();
+  } else if (state.selection.type === "curves") {
+    renderMultiCurvePanel();
   } else {
     renderFacePanel();
   }
+}
+
+// Multiple curves selected via Shift-click: kept deliberately limited to
+// move (via drag, handled in the pointer handlers) and delete - editing
+// per-curve properties (color, width, ...) for a mixed group has no single
+// obvious value to show, so that's left to single-curve selection for now.
+function renderMultiCurvePanel() {
+  const ids = state.selection.ids;
+  const count = ids.filter(id => state.curves.some(cv => cv.id === id)).length;
+  panel.innerHTML = `
+    <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
+    <div class="panel-section" style="margin-top:16px">
+      <div class="action-row">
+        <button class="icon-btn danger" id="f-delete-multi" title="Delete all selected curves permanently.">${ICON_TRASH}</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("f-delete-multi").addEventListener("click", () => {
+    const idSet = new Set(ids);
+    state.curves = state.curves.filter(cv => !idSet.has(cv.id));
+    state.selection = null;
+    recomputeFaces();
+    render();
+    pushHistory();
+  });
 }
 
 function renderPagePanel() {
@@ -1590,6 +1626,25 @@ function setSelection(sel) {
   render();
 }
 
+// Shift-click toggles one curve's membership in the selection, growing a
+// single-curve selection into a "curves" multi-selection (or shrinking one
+// back down to a plain single-curve selection, or clearing it entirely).
+function toggleCurveInSelection(id) {
+  let ids;
+  if (state.selection && state.selection.type === "curve") {
+    ids = state.selection.id === id ? [] : [state.selection.id, id];
+  } else if (state.selection && state.selection.type === "curves") {
+    ids = state.selection.ids.includes(id)
+      ? state.selection.ids.filter(x => x !== id)
+      : state.selection.ids.concat(id);
+  } else {
+    ids = [id];
+  }
+  if (ids.length === 0) setSelection(null);
+  else if (ids.length === 1) setSelection({ type: "curve", id: ids[0] });
+  else setSelection({ type: "curves", ids });
+}
+
 function showHint(text, persistent) {
   const el = document.getElementById("hint");
   el.textContent = text;
@@ -1707,13 +1762,28 @@ function onStageMouseDown(evt) {
   const curveHit = hitTestCurve(pt);
   if (curveHit) {
     hideHint();
-    setSelection({ type: "curve", id: curveHit.id });
+    if (evt.shiftKey) {
+      toggleCurveInSelection(curveHit.id);
+      return;
+    }
+    // Clicking a curve that's already part of a multi-selection drags the
+    // whole group; clicking any other curve replaces the selection with just
+    // that one, same as before Shift-selection existed.
+    let idsToMove;
+    if (state.selection && state.selection.type === "curves" && state.selection.ids.includes(curveHit.id)) {
+      idsToMove = state.selection.ids.slice();
+    } else {
+      setSelection({ type: "curve", id: curveHit.id });
+      idsToMove = [curveHit.id];
+    }
+    const curves = idsToMove.map(id => state.curves.find(cv => cv.id === id)).filter(Boolean);
     dragCtx = {
       kind: "curve",
-      curve: curveHit,
+      curves,
+      clickedId: curveHit.id,
       start: pt,
       moved: false,
-      orig: { p0: { ...curveHit.p0 }, c1: { ...curveHit.c1 }, c2: { ...curveHit.c2 }, p3: { ...curveHit.p3 } },
+      orig: curves.map(c => ({ p0: { ...c.p0 }, c1: { ...c.c1 }, c2: { ...c.c2 }, p3: { ...c.p3 } })),
     };
     svg.style.cursor = "grabbing";
     window.addEventListener("mousemove", onWindowMouseMove);
@@ -1734,18 +1804,25 @@ function onWindowMouseMove(evt) {
     const res = state.grid.resolution;
     const { width: W, height: H } = state.grid;
     const { orig } = dragCtx;
-    const xs = [orig.p0.x, orig.c1.x, orig.c2.x, orig.p3.x];
-    const ys = [orig.p0.y, orig.c1.y, orig.c2.y, orig.p3.y];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const o of orig) {
+      for (const p of [o.p0, o.c1, o.c2, o.p3]) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+    }
     let dx = Math.round((raw.x - dragCtx.start.x) / res) * res;
     let dy = Math.round((raw.y - dragCtx.start.y) / res) * res;
-    dx = Math.max(-Math.min(...xs), Math.min(W - Math.max(...xs), dx));
-    dy = Math.max(-Math.min(...ys), Math.min(H - Math.max(...ys), dy));
+    dx = Math.max(-minX, Math.min(W - maxX, dx));
+    dy = Math.max(-minY, Math.min(H - maxY, dy));
     dragCtx.moved = dx !== 0 || dy !== 0;
-    const c = dragCtx.curve;
-    c.p0 = { x: orig.p0.x + dx, y: orig.p0.y + dy };
-    c.c1 = { x: orig.c1.x + dx, y: orig.c1.y + dy };
-    c.c2 = { x: orig.c2.x + dx, y: orig.c2.y + dy };
-    c.p3 = { x: orig.p3.x + dx, y: orig.p3.y + dy };
+    dragCtx.curves.forEach((c, i) => {
+      const o = orig[i];
+      c.p0 = { x: o.p0.x + dx, y: o.p0.y + dy };
+      c.c1 = { x: o.c1.x + dx, y: o.c1.y + dy };
+      c.c2 = { x: o.c2.x + dx, y: o.c2.y + dy };
+      c.p3 = { x: o.p3.x + dx, y: o.p3.y + dy };
+    });
     renderHandles();
     curvesLayer.innerHTML = curvesMarkup(state.curves).body + curvesMarkup(computeBorderSegments()).body;
     return;
@@ -1762,6 +1839,11 @@ function onWindowMouseMove(evt) {
 function onWindowMouseUp() {
   if (!dragCtx) return;
   const wasNoOpCurveDrag = dragCtx.kind === "curve" && !dragCtx.moved;
+  // A plain click (no drag) on one member of a multi-selection re-focuses
+  // just that curve, so it can be selected individually without Shift.
+  if (wasNoOpCurveDrag && dragCtx.curves.length > 1) {
+    setSelection({ type: "curve", id: dragCtx.clickedId });
+  }
   dragCtx = null;
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
@@ -1834,10 +1916,11 @@ document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
     if (drawPending) { drawPending = null; hideHint(); renderHandles(); }
     else if (state.selection) { state.selection = null; render(); }
-  } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection && state.selection.type === "curve") {
+  } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection &&
+      (state.selection.type === "curve" || state.selection.type === "curves")) {
     if (document.activeElement && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
-    const id = state.selection.id;
-    state.curves = state.curves.filter(cv => cv.id !== id);
+    const idSet = new Set(state.selection.type === "curve" ? [state.selection.id] : state.selection.ids);
+    state.curves = state.curves.filter(cv => !idSet.has(cv.id));
     state.selection = null;
     recomputeFaces(); render(); pushHistory();
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
