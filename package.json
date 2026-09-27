@@ -1,7 +1,7 @@
 {
   "name": "coeurf",
   "version": "1.0.0",
-  "description": "grid-snapped bezier surface editor",
+  "description": "grid-snapped bezier curve editor",
   "private": true,
   "scripts": {
     "test": "playwright test"
