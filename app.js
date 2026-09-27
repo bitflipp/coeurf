@@ -1777,14 +1777,16 @@ function onWindowMouseUp() {
 function onStageMouseMove(evt) {
   if (spacePanning) { previewLayer.innerHTML = ""; return; }
   if (state.tool === "curve" && !dragCtx) {
+    const s = currentScale();
+    const rA = 7 / s, lw = 1 / s;
     if (drawPending) {
       const p = snapForDrawing(evt);
       const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
       const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
       previewLayer.innerHTML =
-        `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${6/currentScale()}" fill="#5b8cff"></circle>` +
-        `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.6/currentScale()}" stroke-dasharray="${4/currentScale()},${3/currentScale()}"></path>` +
-        `<circle cx="${p.x}" cy="${p.y}" r="${5/currentScale()}" fill="#5b8cff" opacity="0.6"></circle>`;
+        `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}"></circle>` +
+        `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.6/s}" stroke-dasharray="${4/s},${3/s}"></path>` +
+        `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#e6453c" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
       return;
     }
     if (hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt))) {
@@ -1795,7 +1797,7 @@ function onStageMouseMove(evt) {
     svg.style.cursor = "crosshair";
     const p = snapForDrawing(evt);
     previewLayer.innerHTML =
-      `<circle cx="${p.x}" cy="${p.y}" r="${6/currentScale()}" fill="none" stroke="#5b8cff" stroke-width="${1.6/currentScale()}"></circle>`;
+      `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
     return;
   }
   if (state.tool === "surface" && !dragCtx) {
