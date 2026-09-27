@@ -797,11 +797,24 @@ function taperedRibbonPath(c, w0, w1, drift) {
   };
 }
 
-function curvesMarkup(curves) {
-  let defs = "";
+// The selected curve used to be forced to a flat blue paint, which hid its
+// actual color/gradient and made edits to it invisible until deselected.
+// Instead, the real paint is always drawn, and selection is shown as a
+// blurred halo of the accent color underneath it - visible without ever
+// covering up the true appearance.
+const CURVE_GLOW_FILTER = `<filter id="curve-glow" x="-60%" y="-60%" width="220%" height="220%">` +
+  `<feGaussianBlur stdDeviation="2.5"/>` +
+  `</filter>`;
+const SELECTION_GLOW_COLOR = "#5b8cff";
+const SELECTION_GLOW_OPACITY = 0.55;
+const SELECTION_GLOW_EXTRA_WIDTH = 5;
+
+function curvesMarkup(curves, includeSelection = true) {
+  let defs = CURVE_GLOW_FILTER;
+  let glowBody = "";
   let body = "";
   for (const c of curves) {
-    const selected = state.selection && state.selection.type === "curve" && state.selection.id === c.id;
+    const selected = includeSelection && state.selection && state.selection.type === "curve" && state.selection.id === c.id;
     const w0 = c.width;
     const w1 = c.width2 != null ? c.width2 : c.width;
     // The ribbon path is what carries the "drift" bulge (see
@@ -811,9 +824,7 @@ function curvesMarkup(curves) {
     const drift = c.drift != null ? c.drift : 1;
 
     let paint;
-    if (selected) {
-      paint = "#5b8cff";
-    } else if (c.colorMode === "gradient" && c.color2) {
+    if (c.colorMode === "gradient" && c.color2) {
       const gid = curveGradientId(c.id);
       const v = gradientVector(c.gradientAngle || 0);
       defs += `<linearGradient id="${gid}" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
@@ -827,6 +838,15 @@ function curvesMarkup(curves) {
 
     if (tapered) {
       const ribbon = taperedRibbonPath(c, w0, w1, drift);
+      if (selected) {
+        glowBody += `<g opacity="${SELECTION_GLOW_OPACITY}">` +
+          `<path d="${ribbon.d}" fill="${SELECTION_GLOW_COLOR}" filter="url(#curve-glow)"></path>`;
+        for (const cap of [ribbon.capStart, ribbon.capEnd]) {
+          if (!cap) continue;
+          glowBody += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${SELECTION_GLOW_COLOR}" filter="url(#curve-glow)"></circle>`;
+        }
+        glowBody += `</g>`;
+      }
       body += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
       for (const cap of [ribbon.capStart, ribbon.capEnd]) {
         if (!cap) continue;
@@ -834,10 +854,13 @@ function curvesMarkup(curves) {
       }
     } else {
       const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
+      if (selected) {
+        glowBody += `<path d="${d}" fill="none" stroke="${SELECTION_GLOW_COLOR}" stroke-width="${w0 + SELECTION_GLOW_EXTRA_WIDTH}" stroke-linecap="round" filter="url(#curve-glow)" opacity="${SELECTION_GLOW_OPACITY}"></path>`;
+      }
       body += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
     }
   }
-  return { defs, body };
+  return { defs, body: glowBody + body };
 }
 
 // Selected-face highlight: drawn in its own layer above the curve strokes so
@@ -1876,8 +1899,8 @@ document.getElementById("load-btn").addEventListener("click", loadFromLocalStora
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
   const { defs, body } = buildDefsAndFaceMarkup(facesCache, facesCache.curvesById || {});
-  const curveA = curvesMarkup(state.curves);
-  const curveB = curvesMarkup(computeBorderSegments());
+  const curveA = curvesMarkup(state.curves, false);
+  const curveB = curvesMarkup(computeBorderSegments(), false);
   const curves = curveA.body + curveB.body;
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +
