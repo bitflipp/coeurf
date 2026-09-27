@@ -2027,7 +2027,7 @@ function init() {
   recomputeFaces();
   pushHistory();
   setTool("curve");
-  updateZoomUI();
+  fitToScreen();
   window.addEventListener("resize", render);
 }
 
