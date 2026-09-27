@@ -1133,7 +1133,9 @@ function renderCurvePanel() {
       <div class="field-row"><label>Taper</label><input type="checkbox" id="f-taper" ${isTapered ? "checked" : ""}></div>
       <div id="taper-fields"></div>
       <button class="block-btn" id="f-mirror">Mirror copy</button>
-      <button class="danger-btn" id="f-delete">Delete curve</button>
+      <button class="block-btn" id="f-mirror-h">Mirror horizontal axis</button>
+      <button class="block-btn" id="f-mirror-v">Mirror vertical axis</button>
+      <button class="danger-btn" id="f-delete">Delete</button>
     </div>
   `;
 
@@ -1337,6 +1339,22 @@ function renderCurvePanel() {
 
   document.getElementById("f-mirror").addEventListener("click", () => {
     const mirrored = mirrorCurve(c);
+    state.curves.push(mirrored);
+    recomputeFaces();
+    setSelection({ type: "curve", id: mirrored.id });
+    pushHistory();
+  });
+
+  document.getElementById("f-mirror-h").addEventListener("click", () => {
+    const mirrored = mirrorCurveHorizontalAxis(c);
+    state.curves.push(mirrored);
+    recomputeFaces();
+    setSelection({ type: "curve", id: mirrored.id });
+    pushHistory();
+  });
+
+  document.getElementById("f-mirror-v").addEventListener("click", () => {
+    const mirrored = mirrorCurveVerticalAxis(c);
     state.curves.push(mirrored);
     recomputeFaces();
     setSelection({ type: "curve", id: mirrored.id });
@@ -1582,6 +1600,26 @@ function mirrorCurve(c) {
   };
   const id = "c" + (state.curveIdCounter++);
   return { id, isBorder: false, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
+    width: c.width, width2: c.width2, drift: c.drift, color: c.color,
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
+}
+
+// Mirrors a curve across the page's horizontal center axis (flips top/bottom).
+function mirrorCurveHorizontalAxis(c) {
+  const H = state.grid.height;
+  const reflect = p => ({ x: p.x, y: H - p.y });
+  const id = "c" + (state.curveIdCounter++);
+  return { id, isBorder: false, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
+    width: c.width, width2: c.width2, drift: c.drift, color: c.color,
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
+}
+
+// Mirrors a curve across the page's vertical center axis (flips left/right).
+function mirrorCurveVerticalAxis(c) {
+  const W = state.grid.width;
+  const reflect = p => ({ x: W - p.x, y: p.y });
+  const id = "c" + (state.curveIdCounter++);
+  return { id, isBorder: false, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
 }
