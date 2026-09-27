@@ -229,6 +229,103 @@ let facesCache = [];  // last computed faces, for click hit-testing & inheritanc
 let drawPending = null; // {x,y} snapped anchor while placing a new curve
 let dragCtx = null;    // active drag context
 
+/* ---------------------------------------------------------------------- */
+/* View: zoom & pan                                                        */
+/*                                                                          */
+/* Purely a viewport concern, not design data - kept out of `state` so it   */
+/* is never saved, undone/redone, or exported.                             */
+/* ---------------------------------------------------------------------- */
+
+const MIN_ZOOM = 0.1, MAX_ZOOM = 8;
+let zoom = 1;
+let spacePanning = false; // spacebar held: next drag on the canvas pans instead of drawing/editing
+let panDragCtx = null;
+const canvasScrollEl = document.getElementById("canvas-scroll");
+
+// Screen point (or, with no event, the viewport center) to pivot a zoom
+// change around, so the content under the cursor/center stays put.
+function zoomPivotPoint(evt) {
+  if (evt) return { clientX: evt.clientX, clientY: evt.clientY };
+  const r = canvasScrollEl.getBoundingClientRect();
+  return { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+}
+
+function setZoom(newZoom, evt) {
+  const clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+  if (Math.abs(clamped - zoom) < 1e-6) return;
+  const { clientX, clientY } = zoomPivotPoint(evt);
+  const containerRect = canvasScrollEl.getBoundingClientRect();
+  const style = getComputedStyle(canvasScrollEl);
+  const padLeft = parseFloat(style.paddingLeft) || 0;
+  const padTop = parseFloat(style.paddingTop) || 0;
+  // Position of the pivot within the scrollable content, in current
+  // (pre-zoom) CSS pixels, then converted to design (user-space) units.
+  const contentX = canvasScrollEl.scrollLeft + (clientX - containerRect.left) - padLeft;
+  const contentY = canvasScrollEl.scrollTop + (clientY - containerRect.top) - padTop;
+  const userX = contentX / zoom;
+  const userY = contentY / zoom;
+  zoom = clamped;
+  renderCanvas();
+  updateZoomUI();
+  // Re-derive scroll so the same design point lands under the same screen point.
+  canvasScrollEl.scrollLeft = userX * zoom - (clientX - containerRect.left) + padLeft;
+  canvasScrollEl.scrollTop = userY * zoom - (clientY - containerRect.top) + padTop;
+}
+
+function zoomIn(evt) { setZoom(zoom * 1.25, evt); }
+function zoomOut(evt) { setZoom(zoom / 1.25, evt); }
+function resetZoom() { setZoom(1); }
+
+function fitToScreen() {
+  const r = canvasScrollEl.getBoundingClientRect();
+  const style = getComputedStyle(canvasScrollEl);
+  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+  const availW = r.width - padX, availH = r.height - padY;
+  const { width: W, height: H } = state.grid;
+  if (availW <= 0 || availH <= 0) return;
+  zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(availW / W, availH / H)));
+  renderCanvas();
+  updateZoomUI();
+  canvasScrollEl.scrollLeft = 0;
+  canvasScrollEl.scrollTop = 0;
+}
+
+function updateZoomUI() {
+  const btn = document.getElementById("zoom-level-btn");
+  if (btn) btn.textContent = Math.round(zoom * 100) + "%";
+}
+
+function startPan(evt) {
+  panDragCtx = {
+    startX: evt.clientX, startY: evt.clientY,
+    scrollLeft: canvasScrollEl.scrollLeft, scrollTop: canvasScrollEl.scrollTop,
+  };
+  canvasScrollEl.classList.add("panning");
+  window.addEventListener("mousemove", onPanMouseMove);
+  window.addEventListener("mouseup", onPanMouseUp);
+}
+function onPanMouseMove(evt) {
+  if (!panDragCtx) return;
+  canvasScrollEl.scrollLeft = panDragCtx.scrollLeft - (evt.clientX - panDragCtx.startX);
+  canvasScrollEl.scrollTop = panDragCtx.scrollTop - (evt.clientY - panDragCtx.startY);
+}
+function onPanMouseUp() {
+  panDragCtx = null;
+  canvasScrollEl.classList.remove("panning");
+  window.removeEventListener("mousemove", onPanMouseMove);
+  window.removeEventListener("mouseup", onPanMouseUp);
+}
+
+// Plain wheel/trackpad scroll pans natively via #canvas-scroll's own
+// overflow:auto - only Ctrl/Cmd+wheel (also how browsers report trackpad
+// pinch gestures) is intercepted here, to zoom instead of scroll.
+canvasScrollEl.addEventListener("wheel", evt => {
+  if (!(evt.ctrlKey || evt.metaKey)) return;
+  evt.preventDefault();
+  setZoom(zoom * Math.exp(-evt.deltaY * 0.001), evt);
+}, { passive: false });
+
 const history = [];
 let historyIndex = -1;
 
@@ -826,15 +923,15 @@ function renderHandles() {
   const c = state.curves.find(cv => cv.id === state.selection.id);
   if (!c) return;
   const s = currentScale();
-  const rA = 6 / s, rC = 5 / s, lw = 1.4 / s;
+  const rA = 7 / s, rC = 6 / s, lw = 1.6 / s;
   let html = "";
   html += `<line x1="${c.p0.x}" y1="${c.p0.y}" x2="${c.c1.x}" y2="${c.c1.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
   html += `<line x1="${c.p3.x}" y1="${c.p3.y}" x2="${c.c2.x}" y2="${c.c2.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
   const mk = (p, r, fill, key) => `<circle class="handle" cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="#1b1d22" stroke-width="${1/s}" data-handle="${key}"></circle>`;
   html += mk(c.c1, rC, "#ffb020", "c1");
   html += mk(c.c2, rC, "#ffb020", "c2");
-  html += mk(c.p0, rA, "#5b8cff", "p0");
-  html += mk(c.p3, rA, "#5b8cff", "p3");
+  html += mk(c.p0, rA, "#2ecc71", "p0");
+  html += mk(c.p3, rA, "#e6453c", "p3");
   handlesLayer.innerHTML = html;
 }
 
@@ -846,8 +943,8 @@ function renderHandles() {
 function renderCanvas() {
   const { width: W, height: H } = state.grid;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("width", W);
-  svg.setAttribute("height", H);
+  svg.setAttribute("width", W * zoom);
+  svg.setAttribute("height", H * zoom);
 
   if (!gridLayer) ensureLayers();
   renderGrid();
@@ -875,6 +972,61 @@ function render() {
 
 const panel = document.getElementById("panel");
 
+// All colors currently in use anywhere in the design, so a color field can
+// offer them as one-click swatches instead of requiring the OS picker for a
+// color that's already on the canvas.
+function usedColors() {
+  const seen = new Set();
+  const order = [];
+  const add = c => {
+    if (!c) return;
+    const v = c.toLowerCase();
+    if (!seen.has(v)) { seen.add(v); order.push(v); }
+  };
+  add(state.grid.borderColor);
+  for (const c of state.curves) {
+    add(c.color);
+    if (c.colorMode === "gradient") add(c.color2);
+  }
+  for (const sig of Object.keys(state.faceStyles)) {
+    const s = state.faceStyles[sig];
+    if (s.type === "gradient") { add(s.color1); add(s.color2); } else { add(s.color); }
+  }
+  return order;
+}
+
+function swatchesMarkup() {
+  const colors = usedColors();
+  if (!colors.length) return "";
+  return `<div class="swatches">` +
+    colors.map(c => `<button type="button" class="swatch" style="background:${c}" data-swatch="${c}" title="${c}"></button>`).join("") +
+    `</div>`;
+}
+
+// Wires up a swatches block's buttons to drive an existing <input
+// type="color"> as if the user had picked that color themselves, so it
+// reuses whatever 'input'/'change' listeners are already attached to it.
+// Also keeps the swatch matching the input's current value highlighted,
+// live, including while the OS picker is being dragged.
+function wireSwatches(container, inputEl) {
+  if (!container) return;
+  const syncActive = () => {
+    const cur = inputEl.value.toLowerCase();
+    for (const btn of container.querySelectorAll(".swatch")) {
+      btn.classList.toggle("active", btn.dataset.swatch === cur);
+    }
+  };
+  syncActive();
+  for (const btn of container.querySelectorAll(".swatch")) {
+    btn.addEventListener("click", () => {
+      inputEl.value = btn.dataset.swatch;
+      inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+      inputEl.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  inputEl.addEventListener("input", syncActive);
+}
+
 function renderPanel() {
   if (state.tool === "page") { renderPagePanel(); return; }
   if (state.tool === "grid") { renderGridPanel(); return; }
@@ -900,9 +1052,11 @@ function renderPagePanel() {
       <div class="field-row"><label>Width</label><input type="number" min="20" step="1" id="p-width" value="${g.width}"></div>
       <div class="field-row"><label>Height</label><input type="number" min="20" step="1" id="p-height" value="${g.height}"></div>
       <div class="field-row"><label>Border color</label><input type="color" id="p-bcolor" value="${g.borderColor}"></div>
+      ${swatchesMarkup()}
       <div class="field-row"><label>Border width</label><input type="number" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"></div>
     </div>
   `;
+  wireSwatches(panel, document.getElementById("p-bcolor"));
   const applyPageFields = () => {
     const w = Math.max(20, parseInt(document.getElementById("p-width").value, 10) || state.grid.width);
     const h = Math.max(20, parseInt(document.getElementById("p-height").value, 10) || state.grid.height);
@@ -991,12 +1145,14 @@ function renderCurvePanel() {
         <label>Color</label>
         <input type="color" id="f-color" value="${c.color}">
       </div>
+      ${swatchesMarkup()}
     `;
     document.getElementById("f-color").addEventListener("input", e => {
       c.color = e.target.value;
       renderCanvas();
     });
     document.getElementById("f-color").addEventListener("change", () => pushHistory());
+    wireSwatches(colorFields, document.getElementById("f-color"));
   }
 
   function paintGradientFields() {
@@ -1006,10 +1162,12 @@ function renderCurvePanel() {
         <label>Start</label>
         <input type="color" id="f-g1" value="${c.color}">
       </div>
+      ${swatchesMarkup()}
       <div class="field-row">
         <label>End</label>
         <input type="color" id="f-g2" value="${c.color2}">
       </div>
+      ${swatchesMarkup()}
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-gangle" min="0" max="359" step="1" value="${c.gradientAngle}">
@@ -1032,6 +1190,9 @@ function renderCurvePanel() {
       updatePreview(); renderCanvas();
     });
     document.getElementById("f-g2").addEventListener("change", () => pushHistory());
+    const swatchBlocks = colorFields.querySelectorAll(".swatches");
+    wireSwatches(swatchBlocks[0], document.getElementById("f-g1"));
+    wireSwatches(swatchBlocks[1], document.getElementById("f-g2"));
     const angleInput = document.getElementById("f-gangle");
     const angleNum = document.getElementById("f-gangle-num");
     angleInput.addEventListener("input", e => {
@@ -1215,12 +1376,14 @@ function renderFacePanel() {
         <label>Color</label>
         <input type="color" id="f-scolor" value="${s.color}">
       </div>
+      ${swatchesMarkup()}
     `;
     document.getElementById("f-scolor").addEventListener("input", e => {
       s.color = e.target.value;
       renderCanvas();
     });
     document.getElementById("f-scolor").addEventListener("change", () => pushHistory());
+    wireSwatches(fields, document.getElementById("f-scolor"));
   }
 
   function paintGradient() {
@@ -1231,10 +1394,12 @@ function renderFacePanel() {
         <label>Start</label>
         <input type="color" id="f-g1" value="${s.color1}">
       </div>
+      ${swatchesMarkup()}
       <div class="field-row">
         <label>End</label>
         <input type="color" id="f-g2" value="${s.color2}">
       </div>
+      ${swatchesMarkup()}
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-gangle" min="0" max="359" step="1" value="${s.angle}">
@@ -1257,6 +1422,9 @@ function renderFacePanel() {
       updatePreview(); renderCanvas();
     });
     document.getElementById("f-g2").addEventListener("change", () => pushHistory());
+    const swatchBlocks = fields.querySelectorAll(".swatches");
+    wireSwatches(swatchBlocks[0], document.getElementById("f-g1"));
+    wireSwatches(swatchBlocks[1], document.getElementById("f-g2"));
     // Same live-update/panel-decoupling as the width gauge above: only
     // renderCanvas(), never a full render(), while the value is still changing.
     const angleInput = document.getElementById("f-gangle");
@@ -1326,14 +1494,14 @@ function findNearVertex(pt, tolerance) {
 
 function snapForDrawing(evt) {
   const raw = toSvgPoint(evt);
-  const tol = 10 / currentScale();
+  const tol = 11 / currentScale();
   const near = findNearVertex(raw, tol);
   if (near) return near;
   return snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
 }
 
 function hitTestCurve(pt) {
-  const tol = 7 / currentScale();
+  const tol = 8 / currentScale();
   let best = null, bestD = tol;
   for (const c of state.curves) {
     if (c.isBorder) continue;
@@ -1356,7 +1524,7 @@ function hitTestHandle(evt) {
   const c = state.curves.find(cv => cv.id === state.selection.id);
   if (!c) return null;
   const pt = toSvgPoint(evt);
-  const tol = 9 / currentScale();
+  const tol = 10 / currentScale();
   const candidates = [["p0", c.p0], ["c1", c.c1], ["c2", c.c2], ["p3", c.p3]];
   let best = null, bestD = tol;
   for (const [key, p] of candidates) {
@@ -1419,6 +1587,11 @@ function mirrorCurve(c) {
 }
 
 function onStageMouseDown(evt) {
+  if (spacePanning || evt.button === 1) {
+    evt.preventDefault();
+    startPan(evt);
+    return;
+  }
   if (evt.button !== 0) return;
 
   if (state.tool === "page" || state.tool === "grid") return;
@@ -1507,7 +1680,7 @@ function onWindowMouseMove(evt) {
     return;
   }
   const raw = toSvgPoint(evt);
-  const tol = 10 / currentScale();
+  const tol = 11 / currentScale();
   const near = findNearVertex(raw, tol);
   const p = near || snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
   dragCtx.curve[dragCtx.key] = p;
@@ -1531,15 +1704,16 @@ function onWindowMouseUp() {
 // Drawn into previewLayer, never handlesLayer, so this hover-only feedback
 // can never overwrite the selected curve's actual drag handles underneath it.
 function onStageMouseMove(evt) {
+  if (spacePanning) { previewLayer.innerHTML = ""; return; }
   if (state.tool === "curve" && !dragCtx) {
     if (drawPending) {
       const p = snapForDrawing(evt);
       const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
       const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
       previewLayer.innerHTML =
-        `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${5/currentScale()}" fill="#5b8cff"></circle>` +
-        `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.5/currentScale()}" stroke-dasharray="${4/currentScale()},${3/currentScale()}"></path>` +
-        `<circle cx="${p.x}" cy="${p.y}" r="${4/currentScale()}" fill="#5b8cff" opacity="0.6"></circle>`;
+        `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${6/currentScale()}" fill="#5b8cff"></circle>` +
+        `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.6/currentScale()}" stroke-dasharray="${4/currentScale()},${3/currentScale()}"></path>` +
+        `<circle cx="${p.x}" cy="${p.y}" r="${5/currentScale()}" fill="#5b8cff" opacity="0.6"></circle>`;
       return;
     }
     if (hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt))) {
@@ -1550,7 +1724,7 @@ function onStageMouseMove(evt) {
     svg.style.cursor = "crosshair";
     const p = snapForDrawing(evt);
     previewLayer.innerHTML =
-      `<circle cx="${p.x}" cy="${p.y}" r="${5/currentScale()}" fill="none" stroke="#5b8cff" stroke-width="${1.5/currentScale()}"></circle>`;
+      `<circle cx="${p.x}" cy="${p.y}" r="${6/currentScale()}" fill="none" stroke="#5b8cff" stroke-width="${1.6/currentScale()}"></circle>`;
     return;
   }
   if (state.tool === "surface" && !dragCtx) {
@@ -1613,6 +1787,29 @@ document.addEventListener("keydown", evt => {
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "o") {
     evt.preventDefault();
     loadFromLocalStorage();
+  } else if (evt.code === "Space" && !isTyping(evt) && !spacePanning) {
+    evt.preventDefault();
+    spacePanning = true;
+    canvasScrollEl.classList.add("space-pan");
+  } else if ((evt.ctrlKey || evt.metaKey) && (evt.key === "=" || evt.key === "+")) {
+    evt.preventDefault();
+    zoomIn();
+  } else if ((evt.ctrlKey || evt.metaKey) && evt.key === "-") {
+    evt.preventDefault();
+    zoomOut();
+  } else if ((evt.ctrlKey || evt.metaKey) && evt.key === "0") {
+    evt.preventDefault();
+    resetZoom();
+  } else if (!evt.ctrlKey && !evt.metaKey && !isTyping(evt) && (evt.key === "=" || evt.key === "+")) {
+    zoomIn();
+  } else if (!evt.ctrlKey && !evt.metaKey && !isTyping(evt) && evt.key === "-") {
+    zoomOut();
+  }
+});
+document.addEventListener("keyup", evt => {
+  if (evt.code === "Space") {
+    spacePanning = false;
+    canvasScrollEl.classList.remove("space-pan");
   }
 });
 function isTyping(evt) {
@@ -1622,6 +1819,12 @@ function isTyping(evt) {
 svg.addEventListener("mousedown", onStageMouseDown);
 svg.addEventListener("mousemove", onStageMouseMove);
 svg.addEventListener("mouseleave", () => { previewLayer.innerHTML = ""; });
+svg.addEventListener("contextmenu", evt => { if (panDragCtx) evt.preventDefault(); });
+
+document.getElementById("zoom-out-btn").addEventListener("click", () => zoomOut());
+document.getElementById("zoom-in-btn").addEventListener("click", () => zoomIn());
+document.getElementById("zoom-level-btn").addEventListener("click", () => resetZoom());
+document.getElementById("zoom-fit-btn").addEventListener("click", () => fitToScreen());
 
 document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
@@ -1668,6 +1871,7 @@ function init() {
   recomputeFaces();
   pushHistory();
   setTool("curve");
+  updateZoomUI();
   window.addEventListener("resize", render);
 }
 
