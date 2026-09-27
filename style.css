@@ -156,12 +156,25 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 13.5px;
 }
 
+.panel-section + .panel-section {
+  margin-top: 20px;
+}
+
 .panel-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 12px;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
+}
+.panel-section h3::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
 .field-row {
@@ -230,6 +243,26 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: #ffd7de;
 }
 .danger-btn:hover { background: #5a2c3a; }
+
+.action-row {
+  display: flex;
+  gap: 8px;
+}
+.icon-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  color: var(--text-dim);
+}
+.icon-btn:hover { color: var(--text); }
+.icon-btn.danger {
+  background: #4a2530;
+  border-color: #6b2e3d;
+  color: #ffd7de;
+}
+.icon-btn.danger:hover { background: #5a2c3a; color: #ffd7de; }
 
 #hint {
   position: fixed;

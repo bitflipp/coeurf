@@ -1071,7 +1071,6 @@ function renderPagePanel() {
   const g = state.grid;
   panel.innerHTML = `
     <div class="panel-section">
-      <h3>Page</h3>
       <div class="field-row"><label>Width</label><input type="number" min="20" step="1" id="p-width" value="${g.width}"></div>
       <div class="field-row"><label>Height</label><input type="number" min="20" step="1" id="p-height" value="${g.height}"></div>
       <div class="field-row"><label>Border color</label><input type="color" id="p-bcolor" value="${g.borderColor}"></div>
@@ -1105,12 +1104,10 @@ function renderGridPanel() {
   ).join("");
   panel.innerHTML = `
     <div class="panel-section">
-      <h3>Grid</h3>
       <div class="field-row"><label>Visible</label><input type="checkbox" id="g-visible" ${g.visible ? "checked" : ""}></div>
       <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="g-res" value="${g.resolution}"></div>
     </div>
     <div class="panel-section">
-      <h3>Guide lines</h3>
       ${specialRows}
     </div>
   `;
@@ -1135,6 +1132,12 @@ function renderGridPanel() {
   }
 }
 
+const ICON_ATTRS = `viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"`;
+const ICON_MIRROR_SELF = `<svg ${ICON_ATTRS}><path d="M4 12c4-7 12-7 16 0"/><path d="M4 12c4 7 12 7 16 0"/><line x1="4" y1="12" x2="20" y2="12" stroke-dasharray="2.5 2.5"/></svg>`;
+const ICON_FLIP_V = `<svg ${ICON_ATTRS}><line x1="3" y1="12" x2="21" y2="12" stroke-dasharray="2.5 2.5"/><path d="M12 3l-4 4M12 3l4 4"/><path d="M12 21l-4-4M12 21l4-4"/></svg>`;
+const ICON_FLIP_H = `<svg ${ICON_ATTRS}><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/><path d="M3 12l4-4M3 12l4 4"/><path d="M21 12l-4-4M21 12l-4 4"/></svg>`;
+const ICON_TRASH = `<svg ${ICON_ATTRS}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>`;
+
 function renderCurvePanel() {
   const c = state.curves.find(cv => cv.id === state.selection.id);
   if (!c) { state.selection = null; renderPanel(); return; }
@@ -1142,12 +1145,15 @@ function renderCurvePanel() {
   const isTapered = c.width2 != null;
   panel.innerHTML = `
     <div class="panel-section">
-      <h3>Curve</h3>
+      <h3>Fill</h3>
       <div class="seg">
         <button id="c-solid" class="${!isGrad ? "active" : ""}">Solid</button>
         <button id="c-grad" class="${isGrad ? "active" : ""}">Gradient</button>
       </div>
       <div id="color-fields"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Width</h3>
       <div class="field-row">
         <label>${isTapered ? "Start width" : "Width"}</label>
         <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
@@ -1155,10 +1161,15 @@ function renderCurvePanel() {
       </div>
       <div class="field-row"><label>Taper</label><input type="checkbox" id="f-taper" ${isTapered ? "checked" : ""}></div>
       <div id="taper-fields"></div>
-      <button class="block-btn" id="f-mirror">Mirror copy</button>
-      <button class="block-btn" id="f-mirror-h">Mirror horizontal axis</button>
-      <button class="block-btn" id="f-mirror-v">Mirror vertical axis</button>
-      <button class="danger-btn" id="f-delete">Delete</button>
+    </div>
+    <div class="panel-section">
+      <h3>Actions</h3>
+      <div class="action-row">
+        <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
+        <button class="icon-btn" id="f-mirror-h" title="Mirror horizontal axis: add a new curve flipped top-to-bottom across the page's horizontal centerline.">${ICON_FLIP_V}</button>
+        <button class="icon-btn" id="f-mirror-v" title="Mirror vertical axis: add a new curve flipped left-to-right across the page's vertical centerline.">${ICON_FLIP_H}</button>
+        <button class="icon-btn danger" id="f-delete" title="Delete this curve permanently.">${ICON_TRASH}</button>
+      </div>
     </div>
   `;
 
@@ -1400,7 +1411,6 @@ function renderFacePanel() {
   const isGrad = style.type === "gradient";
   panel.innerHTML = `
     <div class="panel-section">
-      <h3>Surface</h3>
       <div class="seg">
         <button id="f-solid" class="${!isGrad ? "active" : ""}">Solid</button>
         <button id="f-grad" class="${isGrad ? "active" : ""}">Gradient</button>
