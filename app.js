@@ -64,7 +64,7 @@ function snapToGrid(x, y, res, w, h) {
 
 const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
-  curves: [],        // {id, isBorder, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
+  curves: [],        // {id, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids}
   tool: "curve",      // "page" | "grid" | "curve"
   curveIdCounter: 1,
@@ -190,6 +190,7 @@ function pushHistory() {
   history.push(cloneState());
   historyIndex = history.length - 1;
   updateUndoRedoButtons();
+  autoSaveToLocalStorage();
 }
 
 function restoreFromSnapshot(snap) {
@@ -220,31 +221,38 @@ function updateUndoRedoButtons() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Save / load (localStorage for now)                                      */
+/* Auto-save (localStorage)                                                */
+/*                                                                          */
+/* The design is persisted to the browser automatically on every change    */
+/* (via pushHistory) and restored automatically on load - no explicit      */
+/* save/load actions.                                                      */
 /* ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "coeurf:design:v1";
 
-function saveToLocalStorage() {
+function autoSaveToLocalStorage() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cloneState()));
-    showHint("Design saved.");
   } catch (e) {
-    showHint("Could not save: " + e.message);
+    // Ignore (e.g. private browsing / storage quota) - autosave is best-effort.
   }
 }
 
-function loadFromLocalStorage() {
+// Restores the last autosaved design, if any, without touching history.
+// Returns whether a design was found and restored.
+function loadAutoSavedDesign() {
   let raw;
   try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { raw = null; }
-  if (!raw) { showHint("No saved design found."); return; }
-  if (!restoreFromJSON(raw)) showHint("Saved data is corrupted and could not be loaded.");
-  else showHint("Design loaded.");
+  if (!raw) return false;
+  let snap;
+  try { snap = JSON.parse(raw); } catch (e) { snap = null; }
+  if (!snap || !snap.grid || !Array.isArray(snap.curves)) return false;
+  restoreFromSnapshot(snap);
+  return true;
 }
 
 // Parses `raw` as a design snapshot and, if valid, restores it and records
-// history. Shared by localStorage load and file import. Returns whether it
-// was valid.
+// history. Used by file import.
 function restoreFromJSON(raw) {
   let snap;
   try { snap = JSON.parse(raw); } catch (e) { snap = null; }
@@ -1268,7 +1276,6 @@ function hitTestCurve(pt) {
   const tol = 8 / currentScale();
   let best = null, bestD = tol;
   for (const c of state.curves) {
-    if (c.isBorder) continue;
     const flat = flattenCubic(c.p0, c.c1, c.c2, c.p3, FLATTEN_SEGMENTS);
     const d = distToPolyline(pt, flat);
     if (d < bestD) { bestD = d; best = c; }
@@ -1357,7 +1364,7 @@ function mirrorCurve(c) {
     return { x: 2 * projX - p.x, y: 2 * projY - p.y };
   };
   const id = "c" + (state.curveIdCounter++);
-  return { id, isBorder: false, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
+  return { id, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
 }
@@ -1367,7 +1374,7 @@ function mirrorCurveHorizontalAxis(c) {
   const H = state.grid.height;
   const reflect = p => ({ x: p.x, y: H - p.y });
   const id = "c" + (state.curveIdCounter++);
-  return { id, isBorder: false, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
+  return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
 }
@@ -1377,7 +1384,7 @@ function mirrorCurveVerticalAxis(c) {
   const W = state.grid.width;
   const reflect = p => ({ x: W - p.x, y: p.y });
   const id = "c" + (state.curveIdCounter++);
-  return { id, isBorder: false, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
+  return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
 }
@@ -1399,7 +1406,7 @@ function onStageMouseDown(evt) {
     const p = snapForDrawing(evt);
     const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
     const id = "c" + (state.curveIdCounter++);
-    const curve = { id, isBorder: false, p0: { ...drawPending }, c1, c2, p3: { ...p }, width: 3, color: "#2a2d34" };
+    const curve = { id, p0: { ...drawPending }, c1, c2, p3: { ...p }, width: 3, color: "#2a2d34" };
     state.curves.push(curve);
     drawPending = null;
     hideHint();
@@ -1591,12 +1598,6 @@ document.addEventListener("keydown", evt => {
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "y") {
     evt.preventDefault();
     redo();
-  } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "s") {
-    evt.preventDefault();
-    saveToLocalStorage();
-  } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "o") {
-    evt.preventDefault();
-    loadFromLocalStorage();
   } else if (evt.code === "Space" && !isTyping(evt) && !spacePanning) {
     evt.preventDefault();
     spacePanning = true;
@@ -1638,8 +1639,6 @@ document.getElementById("zoom-fit-btn").addEventListener("click", () => fitToScr
 
 document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
-document.getElementById("save-btn").addEventListener("click", saveToLocalStorage);
-document.getElementById("load-btn").addEventListener("click", loadFromLocalStorage);
 document.getElementById("download-btn").addEventListener("click", downloadDesign);
 document.getElementById("import-btn").addEventListener("click", () => document.getElementById("import-input").click());
 document.getElementById("import-input").addEventListener("change", evt => {
@@ -1682,19 +1681,11 @@ document.getElementById("export-btn").addEventListener("click", () => {
 
 function init() {
   ensureLayers();
+  loadAutoSavedDesign();
   pushHistory();
   setTool("curve");
   fitToScreen();
   window.addEventListener("resize", render);
-}
-
-// Debug hook (harmless in normal use): lets the browser console, or a headless
-// test harness, inspect and drive internal state directly.
-if (typeof window !== "undefined") {
-  window.__coeurf = {
-    state, undo, redo, buildExportSVG, render, setSelection, saveToLocalStorage, loadFromLocalStorage,
-    downloadDesign, importDesignFromFile,
-  };
 }
 
 init();
