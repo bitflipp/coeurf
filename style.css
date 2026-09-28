@@ -58,15 +58,6 @@ body {
 }
 .tool-group:first-of-type { border-left: none; padding-left: 0; }
 
-.tool-group label {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.tool-group label.check { color: var(--text); }
-
 #zoom-group { min-width: 0; }
 #zoom-level-btn { width: 4.2em; }
 
@@ -93,7 +84,7 @@ button {
   cursor: pointer;
   font-size: 13px;
 }
-button:hover { background: #3439443; background: #343943; }
+button:hover { background: #343943; }
 button.active {
   background: var(--accent-dim);
   border-color: var(--accent);
@@ -192,11 +183,6 @@ button:disabled { opacity: 0.4; cursor: default; }
 .field-row input.num-in { width: 3.4em; text-align: right; flex-shrink: 0; }
 .field-row .unit { color: var(--text-dim); font-size: 13px; flex-shrink: 0; }
 
-.block-btn {
-  width: 100%;
-  margin-top: var(--sp-3);
-}
-
 .seg {
   display: flex;
   border: 1px solid var(--border);
@@ -233,15 +219,6 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .swatch:hover { border-color: var(--accent); transform: scale(1.15); }
 .swatch.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
-
-.danger-btn {
-  width: 100%;
-  margin-top: var(--sp-3);
-  background: #4a2530;
-  border-color: #6b2e3d;
-  color: #ffd7de;
-}
-.danger-btn:hover { background: #5a2c3a; }
 
 .action-row {
   display: flex;
