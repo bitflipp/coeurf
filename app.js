@@ -824,8 +824,8 @@ function renderPageDimensionsFields() {
   const g = state.grid;
   document.getElementById("page-subtool-body").innerHTML = `
     <div class="panel-section">
-      <div class="field-row"><label>Width</label><input type="number" min="20" step="1" id="p-width" value="${g.width}"></div>
-      <div class="field-row"><label>Height</label><input type="number" min="20" step="1" id="p-height" value="${g.height}"></div>
+      <div class="field-row"><label>Width</label><input type="number" class="num-in" min="20" step="1" id="p-width" value="${g.width}"><span class="unit">px</span></div>
+      <div class="field-row"><label>Height</label><input type="number" class="num-in" min="20" step="1" id="p-height" value="${g.height}"><span class="unit">px</span></div>
     </div>
   `;
   const applyDimFields = () => {
@@ -859,7 +859,7 @@ function renderPageBorderFields() {
     </div>
     <div class="panel-section">
       <h3>Width</h3>
-      <div class="field-row"><label>Border width</label><input type="number" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"></div>
+      <div class="field-row"><label>Border width</label><input type="number" class="num-in" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"><span class="unit">px</span></div>
     </div>
   `;
 
@@ -979,7 +979,7 @@ function renderGridPanel() {
   panel.innerHTML = `
     <div class="panel-section">
       <div class="field-row"><label>Visible</label><input type="checkbox" id="g-visible" ${g.visible ? "checked" : ""}></div>
-      <div class="field-row"><label>Resolution</label><input type="number" min="2" step="1" id="g-res" value="${g.resolution}"></div>
+      <div class="field-row"><label>Resolution</label><input type="number" class="num-in" min="2" step="1" id="g-res" value="${g.resolution}"><span class="unit">px</span></div>
     </div>
     <div class="panel-section">
       ${specialRows}
@@ -1045,6 +1045,7 @@ function renderCurvePanel() {
         <label>${isTapered ? "Start width" : "Width"}</label>
         <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
         <input type="number" class="num-in" id="f-width-num" min="0.5" max="30" step="0.5" value="${c.width}">
+        <span class="unit">px</span>
       </div>
       <div class="field-row"><label>Taper</label><input type="checkbox" id="f-taper" ${isTapered ? "checked" : ""}></div>
       <div id="taper-fields"></div>
@@ -1301,11 +1302,13 @@ function renderCurvePanel() {
         <label>End width</label>
         <input type="range" id="f-width2" min="0.5" max="30" step="0.5" value="${c.width2}">
         <input type="number" class="num-in" id="f-width2-num" min="0.5" max="30" step="0.5" value="${c.width2}">
+        <span class="unit">px</span>
       </div>
       <div class="field-row">
         <label>Drift</label>
         <input type="range" id="f-drift" min="0" max="5" step="0.1" value="${drift}">
         <input type="number" class="num-in" id="f-drift-num" min="0" max="5" step="0.1" value="${drift}">
+        <span class="unit">&times;</span>
       </div>
     `;
     const width2Input = document.getElementById("f-width2");
