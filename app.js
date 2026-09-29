@@ -62,11 +62,16 @@ function snapToGrid(x, y, res, w, h) {
 /* Application state                                                       */
 /* ---------------------------------------------------------------------- */
 
+// Colors are copied into curves/border as literal hex values when picked, so
+// editing or deleting a palette entry never touches anything already using it.
+const DEFAULT_PALETTE = ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", "#5b8cff", "#c14bff"];
+
 const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
+  palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
   curves: [],        // {id, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids}
-  tool: "curve",      // "page" | "grid" | "curve"
+  tool: "curve",      // "page" | "grid" | "palette" | "curve"
   curveIdCounter: 1,
 };
 
@@ -180,6 +185,7 @@ let historyIndex = -1;
 function cloneState() {
   return JSON.parse(JSON.stringify({
     grid: state.grid,
+    palette: state.palette,
     curves: state.curves,
     curveIdCounter: state.curveIdCounter,
   }));
@@ -198,9 +204,24 @@ function restoreFromSnapshot(snap) {
   if (state.grid.visible === undefined) state.grid.visible = true;
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
+  state.palette = Array.isArray(snap.palette) ? snap.palette.slice() : paletteFromUsedColors(snap);
   state.curveIdCounter = snap.curveIdCounter;
   state.selection = null;
   render();
+}
+
+// Designs saved before the palette existed have none; seed it with the colors
+// they already use so those stay one click away.
+function paletteFromUsedColors(snap) {
+  const seen = new Set();
+  const add = c => { if (c) seen.add(c.toLowerCase()); };
+  add(snap.grid.borderColor);
+  if (snap.grid.borderColorMode === "gradient") add(snap.grid.borderColor2);
+  for (const c of snap.curves) {
+    add(c.color);
+    if (c.colorMode === "gradient") add(c.color2);
+  }
+  return seen.size ? [...seen] : DEFAULT_PALETTE.slice();
 }
 
 function undo() {
@@ -663,61 +684,133 @@ function render() {
 
 const panel = document.getElementById("panel");
 
-// All colors currently in use anywhere in the design, so a color field can
-// offer them as one-click swatches instead of requiring the OS picker for a
-// color that's already on the canvas.
-function usedColors() {
-  const seen = new Set();
-  const order = [];
-  const add = c => {
-    if (!c) return;
-    const v = c.toLowerCase();
-    if (!seen.has(v)) { seen.add(v); order.push(v); }
-  };
-  add(state.grid.borderColor);
-  if (state.grid.borderColorMode === "gradient") add(state.grid.borderColor2);
-  for (const c of state.curves) {
-    add(c.color);
-    if (c.colorMode === "gradient") add(c.color2);
-  }
-  return order;
-}
+// Which palette entry the Palette tool is editing - a UI concern like
+// `pageSubtool`, so it's kept out of `state`.
+let paletteSelected = 0;
 
 function swatchesMarkup() {
-  const colors = usedColors();
-  if (!colors.length) return "";
+  if (!state.palette.length) {
+    return `<div class="panel-empty swatches-empty">The palette is empty. Add colors with the Palette tool.</div>`;
+  }
   return `<div class="swatches">` +
-    colors.map(c => `<button type="button" class="swatch" style="background:${c}" data-swatch="${c}" title="${c}"></button>`).join("") +
+    state.palette.map(c => `<button type="button" class="swatch" style="background:${c}" data-swatch="${c}" title="${c}"></button>`).join("") +
     `</div>`;
 }
 
-// Wires up a swatches block's buttons to drive an existing <input
-// type="color"> as if the user had picked that color themselves, so it
-// reuses whatever 'input'/'change' listeners are already attached to it.
-// Also keeps the swatch matching the input's current value highlighted,
-// live, including while the OS picker is being dragged.
-function wireSwatches(container, inputEl) {
-  if (!container) return;
-  const syncActive = () => {
-    const cur = inputEl.value.toLowerCase();
-    for (const btn of container.querySelectorAll(".swatch")) {
-      btn.classList.toggle("active", btn.dataset.swatch === cur);
-    }
+// A color field that can only be set from the palette: a label above the
+// palette's swatches, with the current color's swatch highlighted. `onPick` receives the chosen hex; the caller commits it.
+function mountColorField(parent, label, value, onPick) {
+  const wrap = document.createElement("div");
+  wrap.innerHTML =
+    `<div class="field-label">${label}</div>` +
+    swatchesMarkup();
+  const buttons = wrap.querySelectorAll(".swatch");
+  const sync = v => {
+    for (const btn of buttons) btn.classList.toggle("active", btn.dataset.swatch.toLowerCase() === v.toLowerCase());
   };
-  syncActive();
-  for (const btn of container.querySelectorAll(".swatch")) {
+  sync(value);
+  for (const btn of buttons) {
     btn.addEventListener("click", () => {
-      inputEl.value = btn.dataset.swatch;
-      inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-      inputEl.dispatchEvent(new Event("change", { bubbles: true }));
+      sync(btn.dataset.swatch);
+      onPick(btn.dataset.swatch);
     });
   }
-  inputEl.addEventListener("input", syncActive);
+  parent.appendChild(wrap);
+}
+
+function movePaletteColor(from, to) {
+  if (from === to) return;
+  const [c] = state.palette.splice(from, 1);
+  state.palette.splice(to, 0, c);
+  paletteSelected = to;
+  renderPanel();
+  pushHistory();
+}
+
+function renderPalettePanel() {
+  const pal = state.palette;
+  paletteSelected = Math.min(paletteSelected, pal.length - 1);
+  const sel = paletteSelected;
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Colors</h3>
+      <div class="palette-grid">
+        ${pal.map((c, i) => `<button type="button" class="palette-swatch ${i === sel ? "active" : ""}" draggable="true" data-index="${i}" style="background:${c}" title="${c}"></button>`).join("")}
+        <button type="button" class="palette-swatch palette-add" id="pal-add" title="Add color">+</button>
+      </div>
+    </div>
+    ${pal.length ? `
+    <div class="panel-section">
+      <h3>Edit</h3>
+      <div class="field-row">
+        <label>Color</label>
+        <input type="color" id="pal-color" value="${pal[sel]}">
+      </div>
+      <div class="field-row">
+        <label>Hex</label>
+        <input type="text" class="hex-in" id="pal-hex" maxlength="7" spellcheck="false" value="${pal[sel]}">
+      </div>
+      <div class="action-row">
+        <button class="icon-btn danger" id="pal-delete" title="Delete this color from the palette.">${ICON_TRASH}</button>
+      </div>
+    </div>` : ""}
+    <div class="panel-empty" style="margin-top:16px">Other tools can only pick from these colors. Changing or deleting one here doesn't affect anything already using it. Drag to reorder.</div>
+  `;
+
+  document.getElementById("pal-add").addEventListener("click", () => {
+    pal.push(pal.length ? pal[sel] : "#808080");
+    paletteSelected = pal.length - 1;
+    renderPanel();
+    pushHistory();
+  });
+
+  const swatchEls = panel.querySelectorAll(".palette-swatch[data-index]");
+  for (const el of swatchEls) {
+    const i = parseInt(el.dataset.index, 10);
+    el.addEventListener("click", () => { paletteSelected = i; renderPanel(); });
+    el.addEventListener("dragstart", e => { e.dataTransfer.setData("text/plain", String(i)); e.dataTransfer.effectAllowed = "move"; });
+    el.addEventListener("dragover", e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
+    el.addEventListener("drop", e => {
+      e.preventDefault();
+      const from = parseInt(e.dataTransfer.getData("text/plain"), 10);
+      if (Number.isInteger(from)) movePaletteColor(from, i);
+    });
+  }
+
+  if (!pal.length) return;
+  const colorInput = document.getElementById("pal-color");
+  const hexInput = document.getElementById("pal-hex");
+  const selEl = swatchEls[sel];
+  // Live 'input' only patches the existing DOM (see renderCanvas's note on
+  // why the panel isn't rebuilt while the native picker is open).
+  const setColor = v => {
+    pal[sel] = v;
+    selEl.style.background = v;
+    selEl.title = v;
+    hexInput.value = v;
+  };
+  colorInput.addEventListener("input", e => setColor(e.target.value));
+  colorInput.addEventListener("change", () => pushHistory());
+  hexInput.addEventListener("change", e => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(e.target.value.trim());
+    if (!m) { e.target.value = pal[sel]; return; }
+    const v = "#" + m[1].toLowerCase();
+    setColor(v);
+    colorInput.value = v;
+    pushHistory();
+  });
+  document.getElementById("pal-delete").addEventListener("click", () => {
+    pal.splice(sel, 1);
+    paletteSelected = Math.max(0, Math.min(sel, pal.length - 1));
+    renderPanel();
+    pushHistory();
+  });
 }
 
 function renderPanel() {
   if (state.tool === "page") { renderPagePanel(); return; }
   if (state.tool === "grid") { renderGridPanel(); return; }
+  if (state.tool === "palette") { renderPalettePanel(); return; }
   if (!state.selection) {
     panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.</div>`;
     return;
@@ -866,35 +959,18 @@ function renderPageBorderFields() {
   const colorFields = document.getElementById("border-color-fields");
 
   function paintSolidFields() {
-    colorFields.innerHTML = `
-      <div class="field-row">
-        <label>Color</label>
-        <input type="color" id="p-bcolor" value="${g.borderColor}">
-      </div>
-      ${swatchesMarkup()}
-    `;
-    const input = document.getElementById("p-bcolor");
-    input.addEventListener("input", e => {
-      state.grid.borderColor = e.target.value;
-      renderCanvas();
+    colorFields.innerHTML = "";
+    mountColorField(colorFields, "Color", g.borderColor, v => {
+      state.grid.borderColor = v;
+      renderCanvas(); pushHistory();
     });
-    input.addEventListener("change", () => pushHistory());
-    wireSwatches(colorFields, input);
   }
 
   function paintGradientFields() {
     colorFields.innerHTML = `
       <div class="gradient-preview" id="pb-gpreview"></div>
-      <div class="field-row">
-        <label>Start</label>
-        <input type="color" id="p-bcolor" value="${g.borderColor}">
-      </div>
-      ${swatchesMarkup()}
-      <div class="field-row">
-        <label>End</label>
-        <input type="color" id="p-bcolor2" value="${g.borderColor2}">
-      </div>
-      ${swatchesMarkup()}
+      <div id="pb-c1"></div>
+      <div id="pb-c2"></div>
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="p-bangle" min="0" max="359" step="1" value="${g.borderGradientAngle}">
@@ -904,24 +980,17 @@ function renderPageBorderFields() {
     `;
     const updatePreview = () => {
       document.getElementById("pb-gpreview").style.background =
-        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${document.getElementById("p-bcolor").value}, ${document.getElementById("p-bcolor2").value})`;
+        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${state.grid.borderColor}, ${state.grid.borderColor2})`;
     };
     updatePreview();
-    const c1Input = document.getElementById("p-bcolor");
-    const c2Input = document.getElementById("p-bcolor2");
-    c1Input.addEventListener("input", e => {
-      state.grid.borderColor = e.target.value;
-      updatePreview(); renderCanvas();
+    mountColorField(document.getElementById("pb-c1"), "Start", g.borderColor, v => {
+      state.grid.borderColor = v;
+      updatePreview(); renderCanvas(); pushHistory();
     });
-    c1Input.addEventListener("change", () => pushHistory());
-    c2Input.addEventListener("input", e => {
-      state.grid.borderColor2 = e.target.value;
-      updatePreview(); renderCanvas();
+    mountColorField(document.getElementById("pb-c2"), "End", g.borderColor2, v => {
+      state.grid.borderColor2 = v;
+      updatePreview(); renderCanvas(); pushHistory();
     });
-    c2Input.addEventListener("change", () => pushHistory());
-    const swatchBlocks = colorFields.querySelectorAll(".swatches");
-    wireSwatches(swatchBlocks[0], c1Input);
-    wireSwatches(swatchBlocks[1], c2Input);
     const angleInput = document.getElementById("p-bangle");
     const angleNum = document.getElementById("p-bangle-num");
     angleInput.addEventListener("input", e => {
@@ -1074,34 +1143,18 @@ function renderCurvePanel() {
   const colorFields = document.getElementById("color-fields");
 
   function paintSolidFields() {
-    colorFields.innerHTML = `
-      <div class="field-row">
-        <label>Color</label>
-        <input type="color" id="f-color" value="${c.color}">
-      </div>
-      ${swatchesMarkup()}
-    `;
-    document.getElementById("f-color").addEventListener("input", e => {
-      c.color = e.target.value;
-      renderCanvas();
+    colorFields.innerHTML = "";
+    mountColorField(colorFields, "Color", c.color, v => {
+      c.color = v;
+      renderCanvas(); pushHistory();
     });
-    document.getElementById("f-color").addEventListener("change", () => pushHistory());
-    wireSwatches(colorFields, document.getElementById("f-color"));
   }
 
   function paintGradientFields() {
     colorFields.innerHTML = `
       <div class="gradient-preview" id="f-gpreview"></div>
-      <div class="field-row">
-        <label>Start</label>
-        <input type="color" id="f-g1" value="${c.color}">
-      </div>
-      ${swatchesMarkup()}
-      <div class="field-row">
-        <label>End</label>
-        <input type="color" id="f-g2" value="${c.color2}">
-      </div>
-      ${swatchesMarkup()}
+      <div id="f-c1"></div>
+      <div id="f-c2"></div>
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-gangle" min="0" max="359" step="1" value="${c.gradientAngle}">
@@ -1111,22 +1164,17 @@ function renderCurvePanel() {
     `;
     const updatePreview = () => {
       document.getElementById("f-gpreview").style.background =
-        `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
+        `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${c.color}, ${c.color2})`;
     };
     updatePreview();
-    document.getElementById("f-g1").addEventListener("input", e => {
-      c.color = e.target.value;
-      updatePreview(); renderCanvas();
+    mountColorField(document.getElementById("f-c1"), "Start", c.color, v => {
+      c.color = v;
+      updatePreview(); renderCanvas(); pushHistory();
     });
-    document.getElementById("f-g1").addEventListener("change", () => pushHistory());
-    document.getElementById("f-g2").addEventListener("input", e => {
-      c.color2 = e.target.value;
-      updatePreview(); renderCanvas();
+    mountColorField(document.getElementById("f-c2"), "End", c.color2, v => {
+      c.color2 = v;
+      updatePreview(); renderCanvas(); pushHistory();
     });
-    document.getElementById("f-g2").addEventListener("change", () => pushHistory());
-    const swatchBlocks = colorFields.querySelectorAll(".swatches");
-    wireSwatches(swatchBlocks[0], document.getElementById("f-g1"));
-    wireSwatches(swatchBlocks[1], document.getElementById("f-g2"));
     const angleInput = document.getElementById("f-gangle");
     const angleNum = document.getElementById("f-gangle-num");
     angleInput.addEventListener("input", e => {
@@ -1560,7 +1608,7 @@ function onStageMouseDown(evt) {
   }
   if (evt.button !== 0) return;
 
-  if (state.tool === "page" || state.tool === "grid") return;
+  if (state.tool !== "curve") return;
 
   // curve tool: selecting/dragging existing curves takes priority over
   // starting a new one, except while a draw is already in progress, where
@@ -1720,6 +1768,7 @@ function setTool(tool) {
   previewLayer.innerHTML = "";
   document.getElementById("tool-page").classList.toggle("active", tool === "page");
   document.getElementById("tool-grid").classList.toggle("active", tool === "grid");
+  document.getElementById("tool-palette").classList.toggle("active", tool === "palette");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
   svg.style.cursor = "default";
   if (tool === "curve") {
@@ -1730,6 +1779,7 @@ function setTool(tool) {
 
 document.getElementById("tool-page").addEventListener("click", () => setTool("page"));
 document.getElementById("tool-grid").addEventListener("click", () => setTool("grid"));
+document.getElementById("tool-palette").addEventListener("click", () => setTool("palette"));
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
 
 document.addEventListener("keydown", evt => {
@@ -1755,6 +1805,8 @@ document.addEventListener("keydown", evt => {
     setTool("page");
   } else if (evt.key.toLowerCase() === "g" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("grid");
+  } else if (evt.key.toLowerCase() === "l" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("palette");
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") {
     evt.preventDefault();
     if (evt.shiftKey) redo(); else undo();
