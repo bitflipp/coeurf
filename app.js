@@ -64,7 +64,7 @@ function snapToGrid(x, y, res, w, h) {
 
 const state = {
   grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
-  curves: [],        // {id, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?}
+  curves: [],        // {id, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids}
   tool: "curve",      // "page" | "grid" | "curve"
   curveIdCounter: 1,
@@ -365,6 +365,36 @@ function curveGradientId(id) {
   return "curve-grad-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
 }
 
+function curveOpacityMaskId(id) {
+  return "curve-opmask-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
+}
+
+// Opacity is applied to a group wrapping all of a curve's elements, so the
+// overlapping ribbon and cap discs of a tapered curve don't double up. A flat
+// opacity is a plain attribute; a gradient is a luminance-free alpha mask
+// (white stops with varying stop-opacity) over the curve's padded bounds.
+function curveOpacityInfo(c) {
+  const a0 = c.opacity != null ? c.opacity : 1;
+  if (c.opacityMode === "gradient") {
+    const a1 = c.opacity2 != null ? c.opacity2 : 1;
+    const mid = curveOpacityMaskId(c.id);
+    const pts = [c.p0, c.c1, c.c2, c.p3];
+    const pad = Math.max(c.width, c.width2 != null ? c.width2 : 0) * 3 + 4;
+    const x = Math.min(...pts.map(p => p.x)) - pad, y = Math.min(...pts.map(p => p.y)) - pad;
+    const w = Math.max(...pts.map(p => p.x)) + pad - x, h = Math.max(...pts.map(p => p.y)) + pad - y;
+    const v = gradientVector(c.opacityAngle || 0);
+    const defs = `<linearGradient id="${mid}-g" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
+      `<stop offset="0%" stop-color="#fff" stop-opacity="${a0}"/>` +
+      `<stop offset="100%" stop-color="#fff" stop-opacity="${a1}"/>` +
+      `</linearGradient>` +
+      `<mask id="${mid}" maskUnits="userSpaceOnUse" x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}">` +
+      `<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="url(#${mid}-g)"/>` +
+      `</mask>`;
+    return { defs, attr: ` mask="url(#${mid})"` };
+  }
+  return { defs: "", attr: a0 < 1 ? ` opacity="${a0}"` : "" };
+}
+
 // Below this, a tangent is treated as "zero" - i.e. the curve's own control
 // point sits right on its anchor, so there's no reliable direction left to
 // offset in.
@@ -488,6 +518,10 @@ function curvesMarkup(curves, includeSelection = true) {
       paint = c.color;
     }
 
+    const op = curveOpacityInfo(c);
+    defs += op.defs;
+    let curveBody = "";
+
     if (tapered) {
       const ribbon = taperedRibbonPath(c, w0, w1, drift);
       if (selected) {
@@ -499,18 +533,19 @@ function curvesMarkup(curves, includeSelection = true) {
         }
         glowBody += `</g>`;
       }
-      body += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
+      curveBody += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
       for (const cap of [ribbon.capStart, ribbon.capEnd]) {
         if (!cap) continue;
-        body += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></circle>`;
+        curveBody += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></circle>`;
       }
     } else {
       const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
       if (selected) {
         glowBody += `<path d="${d}" fill="none" stroke="${SELECTION_GLOW_COLOR}" stroke-width="${w0 + SELECTION_GLOW_EXTRA_WIDTH}" stroke-linecap="round" filter="url(#curve-glow)" opacity="${SELECTION_GLOW_OPACITY}"></path>`;
       }
-      body += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
+      curveBody += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
     }
+    body += op.attr ? `<g${op.attr}>${curveBody}</g>` : curveBody;
   }
   return { defs, body: glowBody + body };
 }
@@ -972,6 +1007,7 @@ function renderCurvePanel() {
   if (!c) { state.selection = null; renderPanel(); return; }
   const isGrad = c.colorMode === "gradient";
   const isTapered = c.width2 != null;
+  const isOpGrad = c.opacityMode === "gradient";
   panel.innerHTML = `
     <div class="panel-section">
       <h3>Fill</h3>
@@ -980,6 +1016,14 @@ function renderCurvePanel() {
         <button id="c-grad" class="${isGrad ? "active" : ""}">Gradient</button>
       </div>
       <div id="color-fields"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Opacity</h3>
+      <div class="seg">
+        <button id="c-op-flat" class="${!isOpGrad ? "active" : ""}">Flat</button>
+        <button id="c-op-grad" class="${isOpGrad ? "active" : ""}">Gradient</button>
+      </div>
+      <div id="opacity-fields"></div>
     </div>
     <div class="panel-section">
       <h3>Width</h3>
@@ -1105,6 +1149,105 @@ function renderCurvePanel() {
     c.colorMode = "gradient";
     c.color2 = c.color2 || "#5b8cff";
     c.gradientAngle = c.gradientAngle != null ? c.gradientAngle : 90;
+    renderCurvePanel(); renderCanvas(); pushHistory();
+  });
+
+  // Opacity: a percent slider + number pair per stop. Like the other live
+  // controls, 'input' only repaints the canvas and 'change' commits history.
+  const opacityFields = document.getElementById("opacity-fields");
+  function opacityRow(label, id, prop, dflt) {
+    const pct = Math.round((c[prop] != null ? c[prop] : dflt) * 100);
+    return `
+      <div class="field-row">
+        <label>${label}</label>
+        <input type="range" id="${id}" min="0" max="100" step="1" value="${pct}">
+        <input type="number" class="num-in" id="${id}-num" min="0" max="100" step="1" value="${pct}">
+        <span class="unit">%</span>
+      </div>`;
+  }
+  function wireOpacity(id, prop, onChange) {
+    const range = document.getElementById(id);
+    const num = document.getElementById(id + "-num");
+    const apply = v => { c[prop] = v / 100; onChange(); renderCanvas(); };
+    range.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      num.value = v; apply(v);
+    });
+    range.addEventListener("change", () => pushHistory());
+    num.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      if (!Number.isFinite(v)) return;
+      range.value = v; apply(Math.max(0, Math.min(100, v)));
+    });
+    num.addEventListener("change", e => {
+      const v = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+      e.target.value = v; range.value = v; apply(v);
+      pushHistory();
+    });
+  }
+  function paintOpacityFields() {
+    if (!isOpGrad) {
+      opacityFields.innerHTML = opacityRow("Opacity", "f-op", "opacity", 1);
+      wireOpacity("f-op", "opacity", () => {});
+      return;
+    }
+    const angle = c.opacityAngle || 0;
+    opacityFields.innerHTML = `
+      <div class="gradient-preview opacity-preview"><div id="f-oppreview"></div></div>
+      ${opacityRow("Start", "f-op", "opacity", 1)}
+      ${opacityRow("End", "f-op2", "opacity2", 1)}
+      <div class="field-row">
+        <label>Angle</label>
+        <input type="range" id="f-opangle" min="0" max="359" step="1" value="${angle}">
+        <input type="number" class="num-in" id="f-opangle-num" min="0" max="359" step="1" value="${angle}">
+        <span class="unit">&deg;</span>
+      </div>
+    `;
+    const updatePreview = () => {
+      const a0 = c.opacity != null ? c.opacity : 1;
+      const a1 = c.opacity2 != null ? c.opacity2 : 1;
+      document.getElementById("f-oppreview").style.background =
+        `linear-gradient(${c.opacityAngle || 0}deg, rgba(220,224,232,${a0}), rgba(220,224,232,${a1}))`;
+    };
+    updatePreview();
+    wireOpacity("f-op", "opacity", updatePreview);
+    wireOpacity("f-op2", "opacity2", updatePreview);
+    const angleInput = document.getElementById("f-opangle");
+    const angleNum = document.getElementById("f-opangle-num");
+    angleInput.addEventListener("input", e => {
+      c.opacityAngle = parseInt(e.target.value, 10);
+      angleNum.value = c.opacityAngle;
+      updatePreview(); renderCanvas();
+    });
+    angleInput.addEventListener("change", () => pushHistory());
+    angleNum.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      if (!Number.isFinite(v)) return;
+      c.opacityAngle = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+    });
+    angleNum.addEventListener("change", e => {
+      const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
+      c.opacityAngle = v;
+      e.target.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
+    });
+  }
+  paintOpacityFields();
+
+  document.getElementById("c-op-flat").addEventListener("click", () => {
+    if (!isOpGrad) return;
+    c.opacityMode = "flat";
+    renderCurvePanel(); renderCanvas(); pushHistory();
+  });
+  document.getElementById("c-op-grad").addEventListener("click", () => {
+    if (isOpGrad) return;
+    c.opacityMode = "gradient";
+    c.opacity2 = c.opacity2 != null ? c.opacity2 : 0;
+    c.opacityAngle = c.opacityAngle != null ? c.opacityAngle : 90;
     renderCurvePanel(); renderCanvas(); pushHistory();
   });
 
@@ -1366,7 +1509,8 @@ function mirrorCurve(c) {
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
 }
 
 // Mirrors a curve across the page's horizontal center axis (flips top/bottom).
@@ -1376,7 +1520,8 @@ function mirrorCurveHorizontalAxis(c) {
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
 }
 
 // Mirrors a curve across the page's vertical center axis (flips left/right).
@@ -1386,7 +1531,8 @@ function mirrorCurveVerticalAxis(c) {
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle };
+    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
 }
 
 function onStageMouseDown(evt) {
