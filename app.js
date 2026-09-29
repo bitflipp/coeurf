@@ -527,7 +527,7 @@ function isCurveSelected(id) {
 }
 
 function curvesMarkup(curves, includeSelection = true) {
-  let defs = CURVE_GLOW_FILTER;
+  let defs = includeSelection ? CURVE_GLOW_FILTER : "";
   let glowBody = "";
   let body = "";
   for (const c of curves) {
