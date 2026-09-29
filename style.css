@@ -198,7 +198,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .seg button + button { border-left: 1px solid var(--border); }
 
 .gradient-preview {
-  height: 34px;
+  height: 68px;
   border: 1px solid var(--border);
   margin-bottom: var(--sp-3);
 }

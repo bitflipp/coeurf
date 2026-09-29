@@ -298,14 +298,14 @@ function importDesignFromFile(file) {
 
 const BORDER_GRADIENT_ID = "page-border-grad";
 
-// Mirrors curvesMarkup's per-curve gradient handling (see gradientVector)
+// Mirrors curvesMarkup's per-curve gradient handling (see gradientAttrs)
 // for the page border, which is a single shared stroke rather than a
 // per-item list, so it gets one fixed gradient id instead of one per id.
 function borderFillInfo() {
   const g = state.grid;
   if (g.borderColorMode === "gradient" && g.borderColor2) {
-    const v = gradientVector(g.borderGradientAngle || 0);
-    const defs = `<linearGradient id="${BORDER_GRADIENT_ID}" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
+    const attrs = gradientAttrs(g.borderGradientAngle || 0, 0, 0, g.width, g.height);
+    const defs = `<linearGradient id="${BORDER_GRADIENT_ID}" ${attrs}>` +
       `<stop offset="0%" stop-color="${g.borderColor}"/>` +
       `<stop offset="100%" stop-color="${g.borderColor2}"/>` +
       `</linearGradient>`;
@@ -353,10 +353,28 @@ function ensureLayers() {
   svg.appendChild(previewLayer);
 }
 
-function gradientVector(angleDeg) {
+// Angle is in screen space (0 = left to right, 90 = top to bottom, matching
+// cssGradientAngle). The gradient line is centered on the box and sized like
+// CSS does, so the end colors land exactly on the box's far corners.
+function gradientAttrs(angleDeg, x, y, w, h) {
   const rad = (angleDeg % 360) * Math.PI / 180;
   const dx = Math.cos(rad), dy = Math.sin(rad);
-  return { x1: 0.5 - dx * 0.5, y1: 0.5 - dy * 0.5, x2: 0.5 + dx * 0.5, y2: 0.5 + dy * 0.5 };
+  const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2;
+  const cx = x + w / 2, cy = y + h / 2;
+  return `gradientUnits="userSpaceOnUse" x1="${fmt(cx - dx * half)}" y1="${fmt(cy - dy * half)}" ` +
+    `x2="${fmt(cx + dx * half)}" y2="${fmt(cy + dy * half)}"`;
+}
+
+// CSS gradient angles start at "up" and run clockwise; ours start at "right".
+function cssGradientAngle(angleDeg) { return angleDeg + 90; }
+
+// Padded bounds of a curve's control points, so a straight curve still has a
+// non-degenerate box to run its gradient across.
+function curveBox(c) {
+  const pts = [c.p0, c.c1, c.c2, c.p3];
+  const pad = Math.max(c.width, c.width2 != null ? c.width2 : 0) * 3 + 4;
+  const x = Math.min(...pts.map(p => p.x)) - pad, y = Math.min(...pts.map(p => p.y)) - pad;
+  return { x, y, w: Math.max(...pts.map(p => p.x)) + pad - x, h: Math.max(...pts.map(p => p.y)) + pad - y };
 }
 
 function escapeAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
@@ -378,12 +396,8 @@ function curveOpacityInfo(c) {
   if (c.opacityMode === "gradient") {
     const a1 = c.opacity2 != null ? c.opacity2 : 1;
     const mid = curveOpacityMaskId(c.id);
-    const pts = [c.p0, c.c1, c.c2, c.p3];
-    const pad = Math.max(c.width, c.width2 != null ? c.width2 : 0) * 3 + 4;
-    const x = Math.min(...pts.map(p => p.x)) - pad, y = Math.min(...pts.map(p => p.y)) - pad;
-    const w = Math.max(...pts.map(p => p.x)) + pad - x, h = Math.max(...pts.map(p => p.y)) + pad - y;
-    const v = gradientVector(c.opacityAngle || 0);
-    const defs = `<linearGradient id="${mid}-g" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
+    const { x, y, w, h } = curveBox(c);
+    const defs = `<linearGradient id="${mid}-g" ${gradientAttrs(c.opacityAngle || 0, x, y, w, h)}>` +
       `<stop offset="0%" stop-color="#fff" stop-opacity="${a0}"/>` +
       `<stop offset="100%" stop-color="#fff" stop-opacity="${a1}"/>` +
       `</linearGradient>` +
@@ -508,8 +522,8 @@ function curvesMarkup(curves, includeSelection = true) {
     let paint;
     if (c.colorMode === "gradient" && c.color2) {
       const gid = curveGradientId(c.id);
-      const v = gradientVector(c.gradientAngle || 0);
-      defs += `<linearGradient id="${gid}" x1="${v.x1}" y1="${v.y1}" x2="${v.x2}" y2="${v.y2}">` +
+      const b = curveBox(c);
+      defs += `<linearGradient id="${gid}" ${gradientAttrs(c.gradientAngle || 0, b.x, b.y, b.w, b.h)}>` +
         `<stop offset="0%" stop-color="${c.color}"/>` +
         `<stop offset="100%" stop-color="${c.color2}"/>` +
         `</linearGradient>`;
@@ -890,7 +904,7 @@ function renderPageBorderFields() {
     `;
     const updatePreview = () => {
       document.getElementById("pb-gpreview").style.background =
-        `linear-gradient(${state.grid.borderGradientAngle}deg, ${document.getElementById("p-bcolor").value}, ${document.getElementById("p-bcolor2").value})`;
+        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${document.getElementById("p-bcolor").value}, ${document.getElementById("p-bcolor2").value})`;
     };
     updatePreview();
     const c1Input = document.getElementById("p-bcolor");
@@ -1096,7 +1110,7 @@ function renderCurvePanel() {
     `;
     const updatePreview = () => {
       document.getElementById("f-gpreview").style.background =
-        `linear-gradient(${c.gradientAngle}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
+        `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${document.getElementById("f-g1").value}, ${document.getElementById("f-g2").value})`;
     };
     updatePreview();
     document.getElementById("f-g1").addEventListener("input", e => {
@@ -1207,7 +1221,7 @@ function renderCurvePanel() {
       const a0 = c.opacity != null ? c.opacity : 1;
       const a1 = c.opacity2 != null ? c.opacity2 : 1;
       document.getElementById("f-oppreview").style.background =
-        `linear-gradient(${c.opacityAngle || 0}deg, rgba(220,224,232,${a0}), rgba(220,224,232,${a1}))`;
+        `linear-gradient(${cssGradientAngle(c.opacityAngle || 0)}deg, rgba(220,224,232,${a0}), rgba(220,224,232,${a1}))`;
     };
     updatePreview();
     wireOpacity("f-op", "opacity", updatePreview);
