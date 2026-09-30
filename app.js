@@ -389,13 +389,43 @@ function gradientAttrs(angleDeg, x, y, w, h) {
 // CSS gradient angles start at "up" and run clockwise; ours start at "right".
 function cssGradientAngle(angleDeg) { return angleDeg + 90; }
 
-// Padded bounds of a curve's control points, so a straight curve still has a
-// non-degenerate box to run its gradient across.
+// Tight bounds of the curve itself (Bezier extrema, not control points), so a
+// gradient's end stops land exactly on the curve's start and end. Axes with
+// no extent get a 1px floor so a straight horizontal/vertical curve still has
+// a non-degenerate box; the gradient's spread clamps the end colors beyond it.
 function curveBox(c) {
-  const pts = [c.p0, c.c1, c.c2, c.p3];
+  const axis = k => {
+    const [a, b, d, e] = [c.p0[k], c.c1[k], c.c2[k], c.p3[k]];
+    const vals = [a, e];
+    // derivative coefficients: A t^2 + B t + C
+    const A = -a + 3 * b - 3 * d + e, B = 2 * (a - 2 * b + d), C = b - a;
+    const roots = [];
+    if (Math.abs(A) < 1e-9) { if (Math.abs(B) > 1e-9) roots.push(-C / B); }
+    else {
+      const disc = B * B - 4 * A * C;
+      if (disc >= 0) { const r = Math.sqrt(disc); roots.push((-B + r) / (2 * A), (-B - r) / (2 * A)); }
+    }
+    for (const t of roots) {
+      if (t > 0 && t < 1) {
+        const u = 1 - t;
+        vals.push(u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * d + t * t * t * e);
+      }
+    }
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (hi - lo < 1) { const m = (lo + hi) / 2; lo = m - 0.5; hi = m + 0.5; }
+    return [lo, hi];
+  };
+  const [x0, x1] = axis("x"), [y0, y1] = axis("y");
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+// Region an opacity mask must cover: the tight box grown by the stroke's
+// reach, so the mask doesn't clip the stroke (unlike the gradient line, which
+// must stay tight).
+function curveMaskRegion(c) {
+  const b = curveBox(c);
   const pad = Math.max(c.width, c.width2 != null ? c.width2 : 0) * 3 + 4;
-  const x = Math.min(...pts.map(p => p.x)) - pad, y = Math.min(...pts.map(p => p.y)) - pad;
-  return { x, y, w: Math.max(...pts.map(p => p.x)) + pad - x, h: Math.max(...pts.map(p => p.y)) + pad - y };
+  return { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad };
 }
 
 function escapeAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
@@ -411,14 +441,16 @@ function curveOpacityMaskId(id) {
 // Opacity is applied to a group wrapping all of a curve's elements, so the
 // overlapping ribbon and cap discs of a tapered curve don't double up. A flat
 // opacity is a plain attribute; a gradient is a luminance-free alpha mask
-// (white stops with varying stop-opacity) over the curve's padded bounds.
+// (white stops with varying stop-opacity) whose gradient line spans the curve's
+// tight bounds, inside a padded mask region.
 function curveOpacityInfo(c) {
   const a0 = c.opacity != null ? c.opacity : 1;
   if (c.opacityMode === "gradient") {
     const a1 = c.opacity2 != null ? c.opacity2 : 1;
     const mid = curveOpacityMaskId(c.id);
-    const { x, y, w, h } = curveBox(c);
-    const defs = `<linearGradient id="${mid}-g" ${gradientAttrs(c.opacityAngle || 0, x, y, w, h)}>` +
+    const gb = curveBox(c);
+    const { x, y, w, h } = curveMaskRegion(c);
+    const defs = `<linearGradient id="${mid}-g" ${gradientAttrs(c.opacityAngle || 0, gb.x, gb.y, gb.w, gb.h)}>` +
       `<stop offset="0%" stop-color="#fff" stop-opacity="${a0}"/>` +
       `<stop offset="100%" stop-color="#fff" stop-opacity="${a1}"/>` +
       `</linearGradient>` +
