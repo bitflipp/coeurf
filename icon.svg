@@ -5,5 +5,10 @@
 </defs>
 <rect width="100" height="100" rx="22.37" fill="url(#bg)"/>
 <path filter="url(#s)" d="M50,82 C50,82 19,58 19,36 C19,19 37,13 50,28 C63,13 81,19 81,36 C81,58 50,82 50,82 Z" fill="#fff"/>
-<path d="M44.4,35.4 L44.4,66.6 M44.4,35.4 L60.6,35.4 M44.4,50.4 L56.6,50.4" fill="none" stroke="#d1008f" stroke-width="6.5" stroke-linecap="square" stroke-linejoin="miter"/>
+<g transform="translate(53 50) rotate(14) scale(0.82) translate(-51 -48)" fill="none" stroke="#d1008f" stroke-linecap="round" stroke-linejoin="round">
+<path d="M61,29 C52,24 43,29 43.5,38 C44,48 55,51 55,60 C55,67 49,70 42,67" stroke-width="3.6"/>
+<path d="M51.7,41.6 L40.7,49.3" stroke-width="3"/>
+<circle cx="62.5" cy="31" r="4" fill="#d1008f" stroke="none"/>
+<circle cx="40" cy="67" r="4" fill="#d1008f" stroke="none"/>
+</g>
 </svg>
