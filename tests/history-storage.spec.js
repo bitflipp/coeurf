@@ -1,5 +1,15 @@
 const { test, expect, curve, design, STORAGE_KEY } = require("./helpers");
 
+test.describe("new design", () => {
+  test("clears the canvas and can be undone", async ({ app }) => {
+    await app.draw([100, 100], [300, 100]);
+    await app.page.click("#new-btn");
+    expect(await app.curves()).toHaveLength(0);
+    await app.undoBtn.click();
+    expect(await app.curves()).toHaveLength(1);
+  });
+});
+
 test.describe("undo / redo", () => {
   test("buttons start disabled", async ({ app }) => {
     await expect(app.undoBtn).toBeDisabled();
