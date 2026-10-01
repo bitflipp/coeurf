@@ -172,6 +172,36 @@ function setEvenAnchors(c, n) {
   ensureAnchors(c);
 }
 
+// Reverses a curve's direction: start and end swap places, together with
+// their control points, widths, anchors and links, so it looks identical.
+// Links on other curves that point at this curve's start/end anchors are
+// retargeted so those curves stay attached to the same spot.
+function flipCurve(c) {
+  [c.p0, c.p3] = [c.p3, c.p0];
+  [c.c1, c.c2] = [c.c2, c.c1];
+  if (c.width2 != null) [c.width, c.width2] = [c.width2, c.width];
+  for (const a of c.anchors) {
+    a.s = 1 - a.s;
+    if (a.id === "start") a.id = "end"; else if (a.id === "end") a.id = "start";
+  }
+  ensureAnchors(c);
+  if (c.links) {
+    const { p0, p3 } = c.links;
+    delete c.links;
+    if (p3) setLink(c, "p0", p3);
+    if (p0) setLink(c, "p3", p0);
+  }
+  for (const o of state.curves) {
+    if (!o.links) continue;
+    for (const end of ["p0", "p3"]) {
+      const l = o.links[end];
+      if (l && l.curve === c.id) {
+        if (l.anchor === "start") l.anchor = "end"; else if (l.anchor === "end") l.anchor = "start";
+      }
+    }
+  }
+}
+
 function linkedAnchor(c, end) {
   const l = c.links && c.links[end];
   if (!l) return null;
@@ -1381,6 +1411,7 @@ function mountAnchorFields(c) {
 
   const list = document.getElementById("a-list");
   list.innerHTML = c.anchors.map(a => {
+const ICON_FLIP_DIR = `<svg ${ICON_ATTRS}><path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/></svg>`;
     const end = isEndAnchor(a);
     return `<div class="field-row anchor-row" data-anchor="${a.id}">
       <label>${anchorLabel(c, a)}</label>
@@ -1508,6 +1539,7 @@ function renderCurvePanel() {
         <span class="unit">&deg;</span>
       </div>
     `;
+        <button class="icon-btn" id="f-flip" title="Flip: swap this curve's start and end points.">${ICON_FLIP_DIR}</button>
     const updatePreview = () => {
       document.getElementById("f-gpreview").style.background =
         `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${c.color}, ${c.color2})`;
@@ -1834,6 +1866,13 @@ function hitTestHandle(evt) {
 }
 
 function setSelection(sel) {
+  document.getElementById("f-flip").addEventListener("click", () => {
+    flipCurve(c);
+    resolveLinks();
+    render();
+    pushHistory();
+  });
+
   state.selection = sel;
   render();
 }
