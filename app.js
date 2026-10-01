@@ -266,11 +266,12 @@ const state = {
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
   curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids}
-  tool: "curve",      // "page" | "grid" | "palette" | "curve"
+  tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle"
   curveIdCounter: 1,
 };
 
 let drawPending = null; // {x,y,link?} start point while placing a new curve
+let circlePending = null; // {x,y} center while sizing a new circle (Circle tool)
 let lastCurveCreatedAt = -Infinity; // guards the dblclick that follows a quick two-click draw
 let dragCtx = null;    // active drag context
 
@@ -1070,6 +1071,10 @@ function renderPanel() {
   if (state.tool === "page") { renderPagePanel(); return; }
   if (state.tool === "grid") { renderGridPanel(); return; }
   if (state.tool === "palette") { renderPalettePanel(); return; }
+  if (state.tool === "circle") {
+    panel.innerHTML = `<div class="panel-empty">Drag from the center outwards to draw a circle.<br>It is made of four quarter-arc curves, joined end to end and left selected so you can move or style them.</div>`;
+    return;
+  }
   if (!state.selection) {
     panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click anywhere empty to draw one.</div>`;
     return;
@@ -1986,6 +1991,74 @@ function newCurve(p0, p3) {
   return curve;
 }
 
+// Standard control-point reach for a cubic approximating a quarter circle
+// (4/3 * tan(pi/8)); the radial error is about 0.027%.
+const QUARTER_KAPPA = 0.5522847498307936;
+
+// A circle is four quarter-arc curves starting at the top and running
+// clockwise. Each starts attached to the previous one's end anchor, so
+// reshaping one arc drags its neighbor along. Returns the new curves.
+function newCircle(center, r) {
+  const arcs = [];
+  for (let k = 0; k < 4; k++) {
+    const a0 = (-90 + 90 * k) * Math.PI / 180, a1 = a0 + Math.PI / 2;
+    const pt = a => ({ x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) });
+    const p0 = pt(a0), p3 = pt(a1);
+    const curve = newCurve(p0, p3);
+    curve.c1 = { x: p0.x - QUARTER_KAPPA * r * Math.sin(a0), y: p0.y + QUARTER_KAPPA * r * Math.cos(a0) };
+    curve.c2 = { x: p3.x + QUARTER_KAPPA * r * Math.sin(a1), y: p3.y - QUARTER_KAPPA * r * Math.cos(a1) };
+    if (k > 0) setLink(curve, "p0", { curve: arcs[k - 1].id, anchor: "end" });
+    arcs.push(curve);
+  }
+  resolveLinks();
+  return arcs;
+}
+
+function finishCircle(edge) {
+  const r = Math.hypot(edge.x - circlePending.x, edge.y - circlePending.y);
+  const center = circlePending;
+  cancelCircle();
+  if (r < 2) return;
+  const arcs = newCircle(center, r);
+  setTool("curve");
+  setSelection({ type: "curves", ids: arcs.map(c => c.id) });
+  pushHistory();
+}
+
+function cancelCircle() {
+  circlePending = null;
+  previewLayer.innerHTML = "";
+  hideHint();
+}
+
+function circleCenterAndEdge(evt) {
+  const p = snapPoint(evt, null);
+  return { x: p.x, y: p.y };
+}
+
+function onCircleMouseDown(evt) {
+  if (circlePending) { finishCircle(circleCenterAndEdge(evt)); return; }
+  circlePending = circleCenterAndEdge(evt);
+  showHint("Drag or click to set the radius (hold Alt to place freely). Esc to cancel.", true);
+  const startClient = { x: evt.clientX, y: evt.clientY };
+  const onUp = up => {
+    window.removeEventListener("mouseup", onUp);
+    // A plain click leaves the center placed, awaiting a second click.
+    if (circlePending && Math.hypot(up.clientX - startClient.x, up.clientY - startClient.y) >= DRAG_THRESHOLD_PX) {
+      finishCircle(circleCenterAndEdge(up));
+    }
+  };
+  window.addEventListener("mouseup", onUp);
+}
+
+function circlePreviewMarkup(center, edge) {
+  const s = currentScale(), r = Math.hypot(edge.x - center.x, edge.y - center.y);
+  return `<circle cx="${center.x}" cy="${center.y}" r="${r}" fill="none" stroke="#5b8cff" stroke-width="${1.6/s}" stroke-dasharray="${4/s},${3/s}"></circle>` +
+    `<line x1="${center.x}" y1="${center.y}" x2="${edge.x}" y2="${edge.y}" stroke="#5b8cff" stroke-width="${1.6/s}" stroke-dasharray="${3/s},${3/s}"></line>` +
+    `<circle cx="${center.x}" cy="${center.y}" r="${7/s}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${1/s}"></circle>` +
+    `<circle cx="${edge.x}" cy="${edge.y}" r="${7/s}" fill="#e6453c" stroke="#1b1d22" stroke-width="${1/s}" opacity="0.6"></circle>`;
+}
+
 const DRAG_THRESHOLD_PX = 3;
 
 function startWindowDrag(ctx) {
@@ -2007,6 +2080,7 @@ function onStageMouseDown(evt) {
   }
   if (evt.button !== 0) return;
 
+  if (state.tool === "circle") { onCircleMouseDown(evt); return; }
   if (state.tool !== "curve") return;
   if (handleDoubleClick(evt)) return;
 
@@ -2218,6 +2292,15 @@ function handleDoubleClick(evt) {
 // can never overwrite the selected curve's actual drag handles underneath it.
 function onStageMouseMove(evt) {
   if (spacePanning) { previewLayer.innerHTML = ""; return; }
+  if (state.tool === "circle") {
+    svg.style.cursor = "crosshair";
+    const p = circleCenterAndEdge(evt);
+    const s = currentScale();
+    previewLayer.innerHTML = circlePending
+      ? circlePreviewMarkup(circlePending, p)
+      : `<circle cx="${p.x}" cy="${p.y}" r="${7/s}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${1/s}" opacity="0.6"></circle>`;
+    return;
+  }
   if (state.tool === "curve" && !dragCtx) {
     const s = currentScale();
     const rA = 7 / s, lw = 1 / s;
@@ -2262,6 +2345,7 @@ function onStageMouseMove(evt) {
 function setTool(tool) {
   state.tool = tool;
   drawPending = null;
+  circlePending = null;
   state.selection = null;
   hideHint();
   previewLayer.innerHTML = "";
@@ -2269,9 +2353,12 @@ function setTool(tool) {
   document.getElementById("tool-grid").classList.toggle("active", tool === "grid");
   document.getElementById("tool-palette").classList.toggle("active", tool === "palette");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
+  document.getElementById("tool-circle").classList.toggle("active", tool === "circle");
   svg.style.cursor = "default";
   if (tool === "curve") {
     showHint("Click a curve to select it, or click empty canvas (or an anchor) to start a new one.", true);
+  } else if (tool === "circle") {
+    showHint("Drag from the center to the edge to draw a circle (four quarter-arc curves).", true);
   }
   render();
 }
@@ -2280,10 +2367,12 @@ document.getElementById("tool-page").addEventListener("click", () => setTool("pa
 document.getElementById("tool-grid").addEventListener("click", () => setTool("grid"));
 document.getElementById("tool-palette").addEventListener("click", () => setTool("palette"));
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
+document.getElementById("tool-circle").addEventListener("click", () => setTool("circle"));
 
 document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
-    if (drawPending) { drawPending = null; hideHint(); renderHandles(); }
+    if (circlePending) cancelCircle();
+    else if (drawPending) { drawPending = null; hideHint(); renderHandles(); }
     else if (state.selection) { state.selection = null; render(); }
   } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection &&
       (state.selection.type === "curve" || state.selection.type === "curves")) {
@@ -2301,6 +2390,8 @@ document.addEventListener("keydown", evt => {
     reorderSelection(evt.shiftKey || evt.key === "{" ? "back" : "backward");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("curve");
+  } else if (evt.key.toLowerCase() === "o" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("circle");
   } else if (evt.key.toLowerCase() === "p" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("page");
   } else if (evt.key.toLowerCase() === "g" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {

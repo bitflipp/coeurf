@@ -79,3 +79,38 @@ test.describe("drawing curves", () => {
     expect(await app.curves()).toHaveLength(1);
   });
 });
+
+test.describe("circle tool", () => {
+  test("dragging from the center draws four joined quarter arcs", async ({ app }) => {
+    await app.tool("circle");
+    await app.drag([300, 300], [400, 300]);
+    const curves = await app.curves();
+    expect(curves).toHaveLength(4);
+    // every point on every arc lies within 0.1% of the radius
+    const radii = await app.page.evaluate(() => state.curves.flatMap(c =>
+      [0, 0.25, 0.5, 0.75, 1].map(t => { const p = cubicPoint(c.p0, c.c1, c.c2, c.p3, t); return Math.hypot(p.x - 300, p.y - 300); })));
+    for (const r of radii) expect(Math.abs(r - 100)).toBeLessThan(0.1);
+    // closed ring, each arc attached to the previous one
+    for (let i = 0; i < 4; i++) {
+      const next = curves[(i + 1) % 4];
+      expect(curves[i].p3.x).toBeCloseTo(next.p0.x, 6);
+      expect(curves[i].p3.y).toBeCloseTo(next.p0.y, 6);
+    }
+    expect(curves[1].links.p0).toEqual({ curve: curves[0].id, anchor: "end" });
+    const st = await app.state();
+    expect(st.tool).toBe("curve");
+    expect(st.selection).toEqual({ type: "curves", ids: curves.map(c => c.id) });
+  });
+
+  test("two clicks work too, and Escape cancels", async ({ app }) => {
+    await app.tool("circle");
+    await app.click(200, 200);
+    await app.click(200, 300);
+    expect(await app.curves()).toHaveLength(4);
+    await app.page.keyboard.press("o");
+    await app.click(400, 400);
+    await app.page.keyboard.press("Escape");
+    await app.click(500, 400);
+    expect(await app.curves()).toHaveLength(4);
+  });
+});

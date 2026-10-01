@@ -9,6 +9,7 @@ Points can snap to a grid, but every curve also carries anchors that other curve
 ## Features
 
 - **Optional grid snapping**: with *Snap to grid* on (the default), points and dragged curves snap to a configurable grid; turn it off for free placement. The grid also offers center, thirds and golden-section guides
+- **Circle tool**: drag from the center to draw a circle as four joined quarter-arc Bézier curves (about 0.03% radial error), snapped like any other point
 - **Anchors**: each curve has start/end anchors plus any number of extra ones, placed by arc length. Add them with presets (mid, thirds, quarters, divide evenly), the panel, or by double-clicking the selected curve; drag to slide, double-click to remove
 - **Attached curves**: endpoints snap to other curves' anchors and stay attached, so moving, reshaping or sliding the host drags attached curves along. Optional *tangent* anchors also lock the attached curve's control point onto the host's tangent
 - **Curve styling**: solid or gradient colors, per-stop opacity, and tapered strokes
@@ -40,7 +41,7 @@ Then visit <http://localhost:8000>.
 
 | Key | Action |
 |---|---|
-| `P` / `G` / `L` / `C` | Page / Grid / Palette / Curve tool |
+| `P` / `G` / `L` / `C` / `O` | Page / Grid / Palette / Curve / Circle tool |
 | `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` | Undo / redo |
 | `]` / `[` | Bring forward / send backward (hold `Shift` for front / back) |
 | `Delete` / `Backspace` | Delete the selected curve |
