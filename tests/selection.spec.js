@@ -166,4 +166,30 @@ test.describe("selecting, moving and editing", () => {
     expect(cs[4].p0).toEqual({ x: 700, y: 100 });
     expect(cs[4].p3).toEqual({ x: 500, y: 100 });
   });
+
+  test("flip swaps start and end, widths and anchors, and keeps links attached", async ({ app }) => {
+    const host = curve({ x: 100, y: 300 }, { x: 500, y: 300 }, {
+      id: "h", c1: { x: 150, y: 250 }, c2: { x: 400, y: 350 }, width: 4, width2: 10,
+      anchors: [{ id: "start", s: 0 }, { id: "a1", s: 0.25 }, { id: "end", s: 1 }],
+    });
+    const atEnd = curve({ x: 500, y: 100 }, { x: 500, y: 300 }, { id: "k", links: { p3: { curve: "h", anchor: "end" } } });
+    await app.load(design({ curves: [host, atEnd] }));
+    await app.click(300, 300);
+    expect((await app.state()).selection.id).toBe("h");
+    await app.page.click("#f-flip");
+    let h = (await app.curves()).find(c => c.id === "h");
+    expect(h.p0).toEqual({ x: 500, y: 300 });
+    expect(h.p3).toEqual({ x: 100, y: 300 });
+    expect(h.c1).toEqual({ x: 400, y: 350 });
+    expect(h.c2).toEqual({ x: 150, y: 250 });
+    expect([h.width, h.width2]).toEqual([10, 4]);
+    expect(h.anchors.map(a => a.id)).toEqual(["start", "a1", "end"]);
+    expect(h.anchors[1].s).toBeCloseTo(0.75, 5);
+    const k = (await app.curves()).find(c => c.id === "k");
+    expect(k.links.p3).toEqual({ curve: "h", anchor: "start" });
+    expect(k.p3).toEqual({ x: 500, y: 300 });
+    await app.undoBtn.click();
+    h = (await app.curves()).find(c => c.id === "h");
+    expect(h.p0).toEqual({ x: 100, y: 300 });
+  });
 });
