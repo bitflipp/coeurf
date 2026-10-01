@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>cœurf — bezier grid editor</title>
+<title>cœurf — bezier curve editor</title>
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
@@ -44,7 +44,7 @@
       <button id="tool-curve" class="tool-btn active" data-tool="curve" title="Curve tool (C)">Curve</button>
     </nav>
     <div id="panel">
-      <div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.</div>
+      <div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click anywhere empty to draw one.</div>
     </div>
   </aside>
   <div id="canvas-scroll">
@@ -52,7 +52,7 @@
   </div>
 </main>
 
-<div id="hint">Click an existing curve to select it, or an empty grid point to draw a new one.</div>
+<div id="hint">Click a curve to select it, or click empty canvas (or an anchor) to start a new one.</div>
 
 <script src="app.js"></script>
 </body>

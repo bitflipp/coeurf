@@ -300,3 +300,9 @@ input.hex-in {
   cursor: grab;
 }
 .handle:active { cursor: grabbing; }
+
+.anchor-row { margin-bottom: var(--sp-2); }
+.anchor-row .a-del { flex: 0 0 auto; padding: var(--sp-1) var(--sp-2); }
+.anchor-row .anchor-spacer { flex: 0 0 34px; }
+.anchor-row input[type="checkbox"] { flex: 0 0 auto; accent-color: #c14bff; }
+#a-add { margin-bottom: var(--sp-3); }
