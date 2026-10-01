@@ -300,6 +300,10 @@ const state = {
   curveIdCounter: 1,
 };
 
+const BLANK_DESIGN = JSON.parse(JSON.stringify({
+  grid: state.grid, palette: state.palette, curves: [], curveIdCounter: 1,
+}));
+
 let drawPending = null; // {x,y,link?} start point while placing a new curve
 let circlePending = null; // {x,y} center while sizing a new circle (Circle tool)
 let lastCurveCreatedAt = -Infinity; // guards the dblclick that follows a quick two-click draw
@@ -513,6 +517,14 @@ function restoreFromJSON(raw) {
   return true;
 }
 
+// Starts an empty design with default page settings and palette. Recorded in
+// history, so it can be undone.
+function newDesign() {
+  restoreFromSnapshot(BLANK_DESIGN);
+  pushHistory();
+  showHint("New design.");
+}
+
 function timestampForFilename() {
   const d = new Date();
   const pad = n => String(n).padStart(2, "0");
@@ -602,6 +614,19 @@ function ensureLayers() {
   svg.appendChild(gridLayer);
   svg.appendChild(handlesLayer);
   svg.appendChild(previewLayer);
+}
+
+// Row of buttons for the multiples of 45 degrees; onPick gets the chosen angle.
+function angleShortcutsHtml() {
+  let h = '<div class="angle-shortcuts">';
+  for (let a = 0; a < 360; a += 45) h += `<button type="button" data-angle="${a}">${a}&deg;</button>`;
+  return h + "</div>";
+}
+function wireAngleShortcuts(angleInput, onPick) {
+  angleInput.closest(".field-row").nextElementSibling.addEventListener("click", e => {
+    const b = e.target.closest("button[data-angle]");
+    if (b) onPick(parseInt(b.dataset.angle, 10));
+  });
 }
 
 // Angle is in screen space (0 = left to right, 90 = top to bottom, matching
@@ -1272,6 +1297,7 @@ function renderPageBorderFields() {
         <input type="number" class="num-in" id="p-bangle-num" min="0" max="359" step="1" value="${g.borderGradientAngle}">
         <span class="unit">&deg;</span>
       </div>
+      ${angleShortcutsHtml()}
     `;
     const updatePreview = () => {
       document.getElementById("pb-gpreview").style.background =
@@ -1300,6 +1326,13 @@ function renderPageBorderFields() {
       state.grid.borderGradientAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
+    });
+    wireAngleShortcuts(angleInput, v => {
+      state.grid.borderGradientAngle = v;
+      angleNum.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -1378,6 +1411,7 @@ function renderGridPanel() {
 const ICON_ATTRS = `viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"`;
 const ICON_MIRROR_SELF = `<svg ${ICON_ATTRS}><path d="M4 12c4-7 12-7 16 0"/><path d="M4 12c4 7 12 7 16 0"/><line x1="4" y1="12" x2="20" y2="12" stroke-dasharray="2.5 2.5"/></svg>`;
 const ICON_FLIP_V = `<svg ${ICON_ATTRS}><line x1="3" y1="12" x2="21" y2="12" stroke-dasharray="2.5 2.5"/><path d="M12 3l-4 4M12 3l4 4"/><path d="M12 21l-4-4M12 21l4-4"/></svg>`;
+const ICON_FLIP_DIR = `<svg ${ICON_ATTRS}><path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/></svg>`;
 const ICON_FLIP_H = `<svg ${ICON_ATTRS}><line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2.5 2.5"/><path d="M3 12l4-4M3 12l4 4"/><path d="M21 12l-4-4M21 12l-4 4"/></svg>`;
 const ICON_TRASH = `<svg ${ICON_ATTRS}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>`;
 const ICON_TO_FRONT = `<svg ${ICON_ATTRS}><path d="M6 17l6-6 6 6"/><path d="M6 10l6-6 6 6"/></svg>`;
@@ -1411,7 +1445,6 @@ function mountAnchorFields(c) {
 
   const list = document.getElementById("a-list");
   list.innerHTML = c.anchors.map(a => {
-const ICON_FLIP_DIR = `<svg ${ICON_ATTRS}><path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/></svg>`;
     const end = isEndAnchor(a);
     return `<div class="field-row anchor-row" data-anchor="${a.id}">
       <label>${anchorLabel(c, a)}</label>
@@ -1506,6 +1539,7 @@ function renderCurvePanel() {
         <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
         <button class="icon-btn" id="f-mirror-h" title="Mirror horizontal axis: add a new curve flipped top-to-bottom across the page's horizontal centerline.">${ICON_FLIP_V}</button>
         <button class="icon-btn" id="f-mirror-v" title="Mirror vertical axis: add a new curve flipped left-to-right across the page's vertical centerline.">${ICON_FLIP_H}</button>
+        <button class="icon-btn" id="f-flip" title="Flip: swap this curve's start and end points.">${ICON_FLIP_DIR}</button>
         <button class="icon-btn danger" id="f-delete" title="Delete this curve permanently.">${ICON_TRASH}</button>
       </div>
     </div>
@@ -1538,8 +1572,8 @@ function renderCurvePanel() {
         <input type="number" class="num-in" id="f-gangle-num" min="0" max="359" step="1" value="${c.gradientAngle}">
         <span class="unit">&deg;</span>
       </div>
+      ${angleShortcutsHtml()}
     `;
-        <button class="icon-btn" id="f-flip" title="Flip: swap this curve's start and end points.">${ICON_FLIP_DIR}</button>
     const updatePreview = () => {
       document.getElementById("f-gpreview").style.background =
         `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${c.color}, ${c.color2})`;
@@ -1567,6 +1601,13 @@ function renderCurvePanel() {
       c.gradientAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
+    });
+    wireAngleShortcuts(angleInput, v => {
+      c.gradientAngle = v;
+      angleNum.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -1643,6 +1684,7 @@ function renderCurvePanel() {
         <input type="number" class="num-in" id="f-opangle-num" min="0" max="359" step="1" value="${angle}">
         <span class="unit">&deg;</span>
       </div>
+      ${angleShortcutsHtml()}
     `;
     const updatePreview = () => {
       const a0 = c.opacity != null ? c.opacity : 1;
@@ -1667,6 +1709,13 @@ function renderCurvePanel() {
       c.opacityAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
+    });
+    wireAngleShortcuts(angleInput, v => {
+      c.opacityAngle = v;
+      angleNum.value = v;
+      angleInput.value = v;
+      updatePreview(); renderCanvas();
+      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -1817,6 +1866,13 @@ function renderCurvePanel() {
     pushHistory();
   });
 
+  document.getElementById("f-flip").addEventListener("click", () => {
+    flipCurve(c);
+    resolveLinks();
+    render();
+    pushHistory();
+  });
+
   document.getElementById("f-delete").addEventListener("click", () => {
     state.curves = state.curves.filter(cv => cv.id !== c.id);
     resolveLinks();
@@ -1866,13 +1922,6 @@ function hitTestHandle(evt) {
 }
 
 function setSelection(sel) {
-  document.getElementById("f-flip").addEventListener("click", () => {
-    flipCurve(c);
-    resolveLinks();
-    render();
-    pushHistory();
-  });
-
   state.selection = sel;
   render();
 }
@@ -2112,7 +2161,7 @@ function beginDrawAt(snap) {
 }
 
 function onStageMouseDown(evt) {
-  if (spacePanning || evt.button === 1) {
+  if (spacePanning || evt.button === 1 || evt.button === 2) {
     evt.preventDefault();
     startPan(evt);
     return;
@@ -2475,7 +2524,7 @@ function isTyping(evt) {
 svg.addEventListener("mousedown", onStageMouseDown);
 svg.addEventListener("mousemove", onStageMouseMove);
 svg.addEventListener("mouseleave", () => { previewLayer.innerHTML = ""; });
-svg.addEventListener("contextmenu", evt => { if (panDragCtx) evt.preventDefault(); });
+svg.addEventListener("contextmenu", evt => evt.preventDefault()); // right button pans
 
 document.getElementById("zoom-out-btn").addEventListener("click", () => zoomOut());
 document.getElementById("zoom-in-btn").addEventListener("click", () => zoomIn());
@@ -2484,6 +2533,7 @@ document.getElementById("zoom-fit-btn").addEventListener("click", () => fitToScr
 
 document.getElementById("undo-btn").addEventListener("click", undo);
 document.getElementById("redo-btn").addEventListener("click", redo);
+document.getElementById("new-btn").addEventListener("click", newDesign);
 document.getElementById("download-btn").addEventListener("click", downloadDesign);
 document.getElementById("import-btn").addEventListener("click", () => document.getElementById("import-input").click());
 document.getElementById("import-input").addEventListener("change", evt => {
