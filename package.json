@@ -1,7 +1,7 @@
 {
   "name": "coeurf",
   "version": "1.0.0",
-  "description": "grid-snapped bezier curve editor",
+  "description": "bezier curve editor with grid and anchor snapping",
   "private": true,
   "devDependencies": {
     "@playwright/test": "^1.63.0"

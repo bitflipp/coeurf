@@ -1,5 +1,5 @@
 "use strict";
-/* cœurf — grid-snapped cubic bezier editor.
+/* cœurf — cubic bezier editor with anchor-based snapping.
    No build step: this file is loaded directly as a classic script. */
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -59,6 +59,201 @@ function snapToGrid(x, y, res, w, h) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Anchors & links                                                         */
+/*                                                                          */
+/* Every curve carries anchors: points addressed by `s`, the fraction of    */
+/* the curve's arc length (0 = p0, 1 = p3), so they stay put along the     */
+/* curve as it is reshaped. The "start" and "end" anchors are fixed to the  */
+/* endpoints; any others are free to slide. An endpoint of another curve    */
+/* can be linked to an anchor (`curve.links.p0 / p3 = {curve, anchor}`) and */
+/* then follows it for good. An anchor flagged `tangent` also forces the    */
+/* linked curve's adjacent control point onto the anchor's tangent line.    */
+/* ---------------------------------------------------------------------- */
+
+const ARC_SAMPLES = 100;
+const LINK_EPS = 1e-6;
+
+function arcTable(c) {
+  const pts = [c.p0], cum = [0];
+  for (let i = 1; i <= ARC_SAMPLES; i++) {
+    const p = cubicPoint(c.p0, c.c1, c.c2, c.p3, i / ARC_SAMPLES);
+    const q = pts[i - 1];
+    pts.push(p);
+    cum.push(cum[i - 1] + Math.hypot(p.x - q.x, p.y - q.y));
+  }
+  return { pts, cum, total: cum[ARC_SAMPLES] };
+}
+
+function tAtS(table, s) {
+  const { cum, total } = table;
+  if (total < 1e-9) return s;
+  const target = Math.max(0, Math.min(1, s)) * total;
+  let i = 0;
+  while (i < ARC_SAMPLES - 1 && cum[i + 1] < target) i++;
+  const seg = cum[i + 1] - cum[i];
+  const f = seg > 1e-12 ? (target - cum[i]) / seg : 0;
+  return (i + f) / ARC_SAMPLES;
+}
+
+// Position and unit tangent (in the direction of increasing s) at arc-length
+// fraction `s`.
+function curveFrame(c, s) {
+  const t = tAtS(arcTable(c), s);
+  const pt = s <= 0 ? c.p0 : s >= 1 ? c.p3 : cubicPoint(c.p0, c.c1, c.c2, c.p3, t);
+  // Tangents vanish at an endpoint whose control point sits on it; sample a
+  // hair inside instead, and fall back to the chord for fully degenerate curves.
+  const tt = Math.max(1e-3, Math.min(1 - 1e-3, t));
+  let tan = cubicTangent(c.p0, c.c1, c.c2, c.p3, tt);
+  let len = Math.hypot(tan.x, tan.y);
+  if (len < 1e-9) {
+    tan = { x: c.p3.x - c.p0.x, y: c.p3.y - c.p0.y };
+    len = Math.hypot(tan.x, tan.y);
+  }
+  if (len < 1e-9) return { x: pt.x, y: pt.y, tx: 1, ty: 0 };
+  return { x: pt.x, y: pt.y, tx: tan.x / len, ty: tan.y / len };
+}
+
+// Arc-length fraction of the point on the curve nearest to `pt`.
+function nearestS(c, pt) {
+  const { pts, cum, total } = arcTable(c);
+  if (total < 1e-9) return 0;
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < ARC_SAMPLES; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    const f = lenSq > 1e-12 ? Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / lenSq)) : 0;
+    const d = Math.hypot(pt.x - (a.x + f * dx), pt.y - (a.y + f * dy));
+    if (d < bestD) { bestD = d; best = (cum[i] + f * Math.sqrt(lenSq)) / total; }
+  }
+  return best;
+}
+
+function isEndAnchor(a) { return a.id === "start" || a.id === "end"; }
+
+// Guarantees the start/end anchors exist and keeps the list ordered
+// (start, free anchors by position, end). Also covers designs saved before
+// anchors existed.
+function ensureAnchors(c) {
+  const list = Array.isArray(c.anchors) ? c.anchors : [];
+  const free = list.filter(a => !isEndAnchor(a)).sort((a, b) => a.s - b.s);
+  c.anchors = [{ id: "start", s: 0 }, ...free, { id: "end", s: 1 }];
+  for (const a of c.anchors) {
+    if (a.tangent) a.tangent = true; else delete a.tangent;
+  }
+  return c;
+}
+
+function nextAnchorId(c) {
+  let n = 0;
+  for (const a of c.anchors) {
+    const m = /^a(\d+)$/.exec(a.id);
+    if (m) n = Math.max(n, parseInt(m[1], 10));
+  }
+  return "a" + (n + 1);
+}
+
+function addAnchor(c, s) {
+  const a = { id: nextAnchorId(c), s: Math.max(0.001, Math.min(0.999, s)) };
+  c.anchors.push(a);
+  ensureAnchors(c);
+  return a;
+}
+
+// Replaces the free anchors with `n - 1` evenly spaced ones (n divisions).
+// Existing ids are reused in order so links stay attached, just relocated.
+function setEvenAnchors(c, n) {
+  const old = c.anchors.filter(a => !isEndAnchor(a));
+  c.anchors = [c.anchors[0], c.anchors[c.anchors.length - 1]];
+  for (let i = 1; i < n; i++) {
+    const prev = old[i - 1];
+    c.anchors.push(prev ? { ...prev, s: i / n } : { id: nextAnchorId(c), s: i / n });
+  }
+  ensureAnchors(c);
+}
+
+function linkedAnchor(c, end) {
+  const l = c.links && c.links[end];
+  if (!l) return null;
+  const host = state.curves.find(h => h.id === l.curve);
+  const anchor = host && host !== c ? host.anchors.find(a => a.id === l.anchor) : null;
+  return anchor ? { host, anchor } : null;
+}
+
+function setLink(c, end, link) {
+  if (link) {
+    c.links = c.links || {};
+    c.links[end] = { curve: link.curve, anchor: link.anchor };
+  } else if (c.links) {
+    delete c.links[end];
+    if (!c.links.p0 && !c.links.p3) delete c.links;
+  }
+}
+
+// Pulls every linked endpoint onto its anchor, carrying the adjacent control
+// point along (so the curve is translated at that end, not stretched), then
+// settles tangent-locked controls. Hosts may themselves be linked, so repeat
+// until stable; dangling links (deleted curve/anchor) are dropped.
+function resolveLinks() {
+  for (let pass = 0; pass <= state.curves.length; pass++) {
+    let changed = false;
+    for (const c of state.curves) {
+      if (!c.links) continue;
+      for (const end of ["p0", "p3"]) {
+        if (!c.links[end]) continue;
+        const la = linkedAnchor(c, end);
+        if (!la) { setLink(c, end, null); continue; }
+        const f = curveFrame(la.host, la.anchor.s);
+        const ctrl = end === "p0" ? "c1" : "c2";
+        const dx = f.x - c[end].x, dy = f.y - c[end].y;
+        if (Math.abs(dx) > LINK_EPS || Math.abs(dy) > LINK_EPS) {
+          c[end] = { x: f.x, y: f.y };
+          c[ctrl] = { x: c[ctrl].x + dx, y: c[ctrl].y + dy };
+          changed = true;
+        }
+        if (la.anchor.tangent) {
+          const vx = c[ctrl].x - c[end].x, vy = c[ctrl].y - c[end].y;
+          const d = vx * f.tx + vy * f.ty;
+          let sign = d >= 0 ? 1 : -1, len = Math.abs(d);
+          if (len < 1e-6) {
+            // Control point sits on (or square to) the endpoint: give it a
+            // default reach pointing away from the curve's body.
+            len = Math.hypot(c.p3.x - c.p0.x, c.p3.y - c.p0.y) / 3 || 20;
+            sign = end === "p0" ? 1 : -1;
+          }
+          const nx = c[end].x + sign * len * f.tx, ny = c[end].y + sign * len * f.ty;
+          if (Math.abs(nx - c[ctrl].x) > LINK_EPS || Math.abs(ny - c[ctrl].y) > LINK_EPS) {
+            c[ctrl] = { x: nx, y: ny };
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+// Nearest anchor (of any curve but `excludeId`) within `tol`, as a snap target.
+function findNearAnchor(pt, tol, excludeId) {
+  let best = null, bestD = tol;
+  for (const c of state.curves) {
+    if (c.id === excludeId) continue;
+    for (const a of c.anchors) {
+      const f = curveFrame(c, a.s);
+      const d = Math.hypot(f.x - pt.x, f.y - pt.y);
+      if (d < bestD) { bestD = d; best = { x: f.x, y: f.y, link: { curve: c.id, anchor: a.id } }; }
+    }
+  }
+  return best;
+}
+
+function anchorLabel(c, a) {
+  if (a.id === "start") return "Start";
+  if (a.id === "end") return "End";
+  return "#" + (c.anchors.filter(x => !isEndAnchor(x)).indexOf(a) + 1);
+}
+
+/* ---------------------------------------------------------------------- */
 /* Application state                                                       */
 /* ---------------------------------------------------------------------- */
 
@@ -67,15 +262,16 @@ function snapToGrid(x, y, res, w, h) {
 const DEFAULT_PALETTE = ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", "#5b8cff", "#c14bff"];
 
 const state = {
-  grid: { width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
+  grid: { width: 800, height: 600, resolution: 20, snap: true, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
-  curves: [],        // {id, p0,c1,c2,p3, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
+  curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids}
   tool: "curve",      // "page" | "grid" | "palette" | "curve"
   curveIdCounter: 1,
 };
 
-let drawPending = null; // {x,y} snapped anchor while placing a new curve
+let drawPending = null; // {x,y,link?} start point while placing a new curve
+let lastCurveCreatedAt = -Infinity; // guards the dblclick that follows a quick two-click draw
 let dragCtx = null;    // active drag context
 
 // Which sub-panel the Page tool shows - purely a UI concern (like `zoom`),
@@ -202,8 +398,11 @@ function pushHistory() {
 function restoreFromSnapshot(snap) {
   state.grid = JSON.parse(JSON.stringify(snap.grid));
   if (state.grid.visible === undefined) state.grid.visible = true;
+  if (state.grid.snap === undefined) state.grid.snap = true;
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
+  for (const c of state.curves) ensureAnchors(c);
+  resolveLinks();
   state.palette = Array.isArray(snap.palette) ? snap.palette.slice() : paletteFromUsedColors(snap);
   state.curveIdCounter = snap.curveIdCounter;
   state.selection = null;
@@ -666,21 +865,49 @@ function renderGrid() {
     `<g style="mix-blend-mode:difference">${specialGuideLinesMarkup(W, H, scale)}</g>`;
 }
 
+function diamond(x, y, r, attrs) {
+  return `<polygon points="${x},${y - r} ${x + r},${y} ${x},${y + r} ${x - r},${y}" ${attrs}></polygon>`;
+}
+
+// Tangent-locked anchors get a short tick along their tangent.
+function anchorMarkup(c, a, r, s, opacity, fill) {
+  const f = curveFrame(c, a.s);
+  let html = "";
+  if (a.tangent) {
+    const k = r * 2.2;
+    html += `<line x1="${f.x - f.tx * k}" y1="${f.y - f.ty * k}" x2="${f.x + f.tx * k}" y2="${f.y + f.ty * k}" stroke="#c14bff" stroke-width="${1.4 / s}" opacity="${opacity}"></line>`;
+  }
+  html += diamond(f.x, f.y, r, `fill="${fill}" stroke="#1b1d22" stroke-width="${1 / s}" opacity="${opacity}"`);
+  return html;
+}
+
 function renderHandles() {
   handlesLayer.innerHTML = "";
-  if (!state.selection || state.selection.type !== "curve") return;
-  const c = state.curves.find(cv => cv.id === state.selection.id);
-  if (!c) return;
+  if (state.tool !== "curve") return;
   const s = currentScale();
-  const rA = 7 / s, rC = 6 / s, lw = 1.6 / s;
   let html = "";
-  html += `<line x1="${c.p0.x}" y1="${c.p0.y}" x2="${c.c1.x}" y2="${c.c1.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
-  html += `<line x1="${c.p3.x}" y1="${c.p3.y}" x2="${c.c2.x}" y2="${c.c2.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
-  const mk = (p, r, fill, key) => `<circle class="handle" cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="#1b1d22" stroke-width="${1/s}" data-handle="${key}"></circle>`;
-  html += mk(c.c1, rC, "#ffb020", "c1");
-  html += mk(c.c2, rC, "#ffb020", "c2");
-  html += mk(c.p0, rA, "#2ecc71", "p0");
-  html += mk(c.p3, rA, "#e6453c", "p3");
+  // Every curve shows its anchors faintly so snap targets are visible; the
+  // selected curve's are drawn in full below, as draggable handles.
+  for (const c of state.curves) {
+    if (state.selection && state.selection.type === "curve" && state.selection.id === c.id) continue;
+    for (const a of c.anchors) html += anchorMarkup(c, a, 4 / s, s, 0.55, "#c14bff");
+  }
+  const c = state.selection && state.selection.type === "curve" && state.curves.find(cv => cv.id === state.selection.id);
+  if (c) {
+    const rA = 7 / s, rC = 6 / s, lw = 1.6 / s;
+    html += `<line x1="${c.p0.x}" y1="${c.p0.y}" x2="${c.c1.x}" y2="${c.c1.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
+    html += `<line x1="${c.p3.x}" y1="${c.p3.y}" x2="${c.c2.x}" y2="${c.c2.y}" stroke="#5b8cff" stroke-width="${lw}" stroke-dasharray="${3/s},${3/s}"></line>`;
+    for (const a of c.anchors) if (!isEndAnchor(a)) html += anchorMarkup(c, a, 6 / s, s, 1, "#c14bff");
+    const mk = (p, r, fill, key) => {
+      const linked = (key === "p0" || key === "p3") && c.links && c.links[key];
+      const stroke = linked ? "#ffffff" : "#1b1d22";
+      return `<circle class="handle" cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="${(linked ? 2.2 : 1) / s}" data-handle="${key}"></circle>`;
+    };
+    html += mk(c.c1, rC, "#ffb020", "c1");
+    html += mk(c.c2, rC, "#ffb020", "c2");
+    html += mk(c.p0, rA, "#2ecc71", "p0");
+    html += mk(c.p3, rA, "#e6453c", "p3");
+  }
   handlesLayer.innerHTML = html;
 }
 
@@ -844,7 +1071,7 @@ function renderPanel() {
   if (state.tool === "grid") { renderGridPanel(); return; }
   if (state.tool === "palette") { renderPalettePanel(); return; }
   if (!state.selection) {
-    panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click an empty grid point to draw one.</div>`;
+    panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click anywhere empty to draw one.</div>`;
     return;
   }
   if (state.selection.type === "curve") {
@@ -917,6 +1144,7 @@ function renderMultiCurvePanel() {
   document.getElementById("f-delete-multi").addEventListener("click", () => {
     const idSet = new Set(ids);
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
+    resolveLinks();
     state.selection = null;
     render();
     pushHistory();
@@ -1080,6 +1308,7 @@ function renderGridPanel() {
   panel.innerHTML = `
     <div class="panel-section">
       <div class="field-row"><label>Visible</label><input type="checkbox" id="g-visible" ${g.visible ? "checked" : ""}></div>
+      <div class="field-row"><label title="Snap new points and dragged curves to grid intersections. Anchors take priority; hold Alt to bypass.">Snap to grid</label><input type="checkbox" id="g-snap" ${g.snap ? "checked" : ""}></div>
       <div class="field-row"><label>Resolution</label><input type="number" class="num-in" min="2" step="1" id="g-res" value="${g.resolution}"><span class="unit">px</span></div>
     </div>
     <div class="panel-section">
@@ -1089,6 +1318,10 @@ function renderGridPanel() {
   document.getElementById("g-visible").addEventListener("change", e => {
     state.grid.visible = e.target.checked;
     renderCanvas();
+    pushHistory();
+  });
+  document.getElementById("g-snap").addEventListener("change", e => {
+    state.grid.snap = e.target.checked;
     pushHistory();
   });
   document.getElementById("g-res").addEventListener("change", e => {
@@ -1116,6 +1349,67 @@ const ICON_TO_FRONT = `<svg ${ICON_ATTRS}><path d="M6 17l6-6 6 6"/><path d="M6 1
 const ICON_FORWARD = `<svg ${ICON_ATTRS}><path d="M6 15l6-6 6 6"/></svg>`;
 const ICON_BACKWARD = `<svg ${ICON_ATTRS}><path d="M6 9l6 6 6-6"/></svg>`;
 const ICON_TO_BACK = `<svg ${ICON_ATTRS}><path d="M6 7l6 6 6-6"/><path d="M6 14l6 6 6-6"/></svg>`;
+
+// Anchor list, presets and link summary of the curve panel. Edits go through
+// ensureAnchors/resolveLinks so linked curves follow immediately.
+function mountAnchorFields(c) {
+  const commit = () => { ensureAnchors(c); resolveLinks(); render(); pushHistory(); };
+
+  for (const b of document.querySelectorAll("#a-presets button")) {
+    b.addEventListener("click", () => { setEvenAnchors(c, parseInt(b.dataset.div, 10)); commit(); });
+  }
+  document.getElementById("a-divs").addEventListener("change", e => {
+    const n = Math.max(1, Math.min(64, parseInt(e.target.value, 10) || 1));
+    setEvenAnchors(c, n);
+    commit();
+  });
+  document.getElementById("a-add").addEventListener("click", () => {
+    // Bisect the widest gap so repeated clicks spread out.
+    let at = 0.5, gap = 0;
+    for (let i = 0; i < c.anchors.length - 1; i++) {
+      const g = c.anchors[i + 1].s - c.anchors[i].s;
+      if (g > gap) { gap = g; at = (c.anchors[i].s + c.anchors[i + 1].s) / 2; }
+    }
+    addAnchor(c, at);
+    commit();
+  });
+
+  const list = document.getElementById("a-list");
+  list.innerHTML = c.anchors.map(a => {
+    const end = isEndAnchor(a);
+    return `<div class="field-row anchor-row" data-anchor="${a.id}">
+      <label>${anchorLabel(c, a)}</label>
+      <input type="number" class="num-in a-s" min="0" max="100" step="1" value="${Math.round(a.s * 1000) / 10}" ${end ? "disabled" : ""}><span class="unit">%</span>
+      <input type="checkbox" class="a-tan" title="Snap tangent: curves attached here leave along this anchor's tangent" ${a.tangent ? "checked" : ""}>
+      ${end ? `<span class="anchor-spacer"></span>` : `<button class="icon-btn a-del" title="Remove this anchor">${ICON_TRASH}</button>`}
+    </div>`;
+  }).join("");
+  for (const row of list.querySelectorAll(".anchor-row")) {
+    const a = c.anchors.find(x => x.id === row.dataset.anchor);
+    row.querySelector(".a-tan").addEventListener("change", e => { a.tangent = e.target.checked; commit(); });
+    if (isEndAnchor(a)) continue;
+    row.querySelector(".a-s").addEventListener("change", e => {
+      const v = parseFloat(e.target.value);
+      if (Number.isFinite(v)) a.s = Math.max(0.1, Math.min(99.9, v)) / 100;
+      commit();
+    });
+    row.querySelector(".a-del").addEventListener("click", () => {
+      c.anchors = c.anchors.filter(x => x !== a);
+      commit();
+    });
+  }
+
+  // Which anchors this curve's own endpoints are attached to.
+  const links = document.getElementById("a-links");
+  links.innerHTML = ["p0", "p3"].map(end => {
+    const la = linkedAnchor(c, end);
+    if (!la) return "";
+    return `<div class="field-row"><label>${end === "p0" ? "Start" : "End"} attached to ${anchorLabel(la.host, la.anchor)} of ${la.host.id}</label><button class="detach" data-end="${end}" title="Detach: the endpoint stays here but no longer follows the anchor">Detach</button></div>`;
+  }).join("");
+  for (const b of links.querySelectorAll(".detach")) {
+    b.addEventListener("click", () => { setLink(c, b.dataset.end, null); render(); pushHistory(); });
+  }
+}
 
 function renderCurvePanel() {
   const c = state.curves.find(cv => cv.id === state.selection.id);
@@ -1152,6 +1446,19 @@ function renderCurvePanel() {
       <div id="taper-fields"></div>
     </div>
     <div class="panel-section">
+      <h3>Anchors</h3>
+      <div class="seg" id="a-presets">
+        <button data-div="1" title="Only the start and end anchors">Ends</button>
+        <button data-div="2" title="Add an anchor at the midpoint">Mid</button>
+        <button data-div="3" title="Anchors at every third">Thirds</button>
+        <button data-div="4" title="Anchors at every quarter">Quarters</button>
+      </div>
+      <div class="field-row"><label title="Spread anchors evenly by arc length">Divide evenly</label><input type="number" class="num-in" id="a-divs" min="1" max="64" step="1" value="${c.anchors.length - 1}"><span class="unit">&times;</span></div>
+      <div id="a-list"></div>
+      <div class="action-row"><button class="icon-btn" id="a-add" title="Add an anchor (or double-click the selected curve)">+ Add anchor</button></div>
+      <div id="a-links"></div>
+    </div>
+    <div class="panel-section">
       <h3>Actions</h3>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
@@ -1167,6 +1474,8 @@ function renderCurvePanel() {
       </div>
     </div>
   `;
+  mountAnchorFields(c);
+
   document.getElementById("f-to-front").addEventListener("click", () => reorderSelection("front"));
   document.getElementById("f-forward").addEventListener("click", () => reorderSelection("forward"));
   document.getElementById("f-backward").addEventListener("click", () => reorderSelection("backward"));
@@ -1473,6 +1782,7 @@ function renderCurvePanel() {
 
   document.getElementById("f-delete").addEventListener("click", () => {
     state.curves = state.curves.filter(cv => cv.id !== c.id);
+    resolveLinks();
     state.selection = null;
     render();
     pushHistory();
@@ -1490,26 +1800,6 @@ function toSvgPoint(evt) {
   if (!ctm) return { x: 0, y: 0 };
   const loc = pt.matrixTransform(ctm.inverse());
   return { x: loc.x, y: loc.y };
-}
-
-function findNearVertex(pt, tolerance) {
-  let best = null, bestD = tolerance;
-  const { width: W, height: H } = state.grid;
-  const candidates = [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
-  for (const c of state.curves) { candidates.push(c.p0, c.p3); }
-  for (const p of candidates) {
-    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
-    if (d < bestD) { bestD = d; best = { x: p.x, y: p.y }; }
-  }
-  return best;
-}
-
-function snapForDrawing(evt) {
-  const raw = toSvgPoint(evt);
-  const tol = 11 / currentScale();
-  const near = findNearVertex(raw, tol);
-  if (near) return near;
-  return snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
 }
 
 function hitTestCurve(pt) {
@@ -1605,6 +1895,7 @@ function mirrorCurve(c) {
   };
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
+    anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
     opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
@@ -1616,6 +1907,7 @@ function mirrorCurveHorizontalAxis(c) {
   const reflect = p => ({ x: p.x, y: H - p.y });
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
+    anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
     opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
@@ -1627,9 +1919,84 @@ function mirrorCurveVerticalAxis(c) {
   const reflect = p => ({ x: W - p.x, y: p.y });
   const id = "c" + (state.curveIdCounter++);
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
+    anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
     colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
     opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
+}
+
+// Snap target for a point being placed: an anchor of another curve (which
+// also links to it), else a page corner, else the grid (if snapping) or the
+// raw point. Alt bypasses all of it.
+function snapPoint(evt, excludeId) {
+  const raw = toSvgPoint(evt);
+  if (evt.altKey) return { x: raw.x, y: raw.y };
+  const tol = 11 / currentScale();
+  const near = findNearAnchor(raw, tol, excludeId);
+  if (near) return near;
+  const { width: W, height: H } = state.grid;
+  for (const k of [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }]) {
+    if (Math.hypot(k.x - raw.x, k.y - raw.y) < tol) return { x: k.x, y: k.y };
+  }
+  return gridSnapOrRaw(raw);
+}
+
+function gridSnapOrRaw(raw) {
+  const g = state.grid;
+  return g.snap ? snapToGrid(raw.x, raw.y, g.resolution, g.width, g.height) : { x: raw.x, y: raw.y };
+}
+
+// Anchor under the cursor that a click should start a curve from.
+function anchorStartAt(evt) {
+  if (evt.altKey) return null;
+  return findNearAnchor(toSvgPoint(evt), 7 / currentScale(), null);
+}
+
+function hitTestAnchor(evt) {
+  if (!state.selection || state.selection.type !== "curve") return null;
+  const c = state.curves.find(cv => cv.id === state.selection.id);
+  if (!c) return null;
+  const pt = toSvgPoint(evt);
+  const tol = 8 / currentScale();
+  let best = null, bestD = tol;
+  for (const a of c.anchors) {
+    if (isEndAnchor(a)) continue;
+    const f = curveFrame(c, a.s);
+    const d = Math.hypot(f.x - pt.x, f.y - pt.y);
+    if (d < bestD) { bestD = d; best = { curve: c, anchor: a }; }
+  }
+  return best;
+}
+
+function newCurve(p0, p3) {
+  const { c1, c2 } = defaultCurveBetween(p0, p3, state.grid.resolution);
+  const id = "c" + (state.curveIdCounter++);
+  const curve = ensureAnchors({ id, p0: { x: p0.x, y: p0.y }, c1, c2, p3: { x: p3.x, y: p3.y }, width: 3, color: "#2a2d34" });
+  for (const [end, snap] of [["p0", p0], ["p3", p3]]) {
+    if (!snap.link) continue;
+    setLink(curve, end, snap.link);
+    // Tangent-locked: start the control point on the endpoint so it takes the
+    // default reach along the anchor's tangent.
+    const la = linkedAnchor(curve, end);
+    if (la && la.anchor.tangent) curve[end === "p0" ? "c1" : "c2"] = { ...curve[end] };
+  }
+  state.curves.push(curve);
+  resolveLinks();
+  lastCurveCreatedAt = performance.now();
+  return curve;
+}
+
+const DRAG_THRESHOLD_PX = 3;
+
+function startWindowDrag(ctx) {
+  dragCtx = ctx;
+  window.addEventListener("mousemove", onWindowMouseMove);
+  window.addEventListener("mouseup", onWindowMouseUp);
+}
+
+function beginDrawAt(snap) {
+  drawPending = snap;
+  showHint("Click again to finish the curve (snaps to anchors; hold Alt to place freely). Esc to cancel.", true);
 }
 
 function onStageMouseDown(evt) {
@@ -1641,32 +2008,51 @@ function onStageMouseDown(evt) {
   if (evt.button !== 0) return;
 
   if (state.tool !== "curve") return;
+  if (handleDoubleClick(evt)) return;
 
   // curve tool: selecting/dragging existing curves takes priority over
   // starting a new one, except while a draw is already in progress, where
   // the click always finishes/connects it (never reinterpreted as a select).
   if (drawPending) {
-    const p = snapForDrawing(evt);
-    const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
-    const id = "c" + (state.curveIdCounter++);
-    const curve = { id, p0: { ...drawPending }, c1, c2, p3: { ...p }, width: 3, color: "#2a2d34" };
-    state.curves.push(curve);
+    let p = snapPoint(evt, null);
+    // Clicking back on the start point makes a self-loop.
+    if (!p.link && Math.hypot(p.x - drawPending.x, p.y - drawPending.y) < 6 / currentScale()) {
+      p = { x: drawPending.x, y: drawPending.y };
+    }
+    const curve = newCurve(drawPending, p);
     drawPending = null;
+    previewLayer.innerHTML = "";
     hideHint();
-    setSelection({ type: "curve", id });
+    setSelection({ type: "curve", id: curve.id });
     pushHistory();
     return;
   }
 
+  const pt = toSvgPoint(evt);
+  const forceStart = evt.ctrlKey || evt.metaKey;
+
+  // Ctrl/Cmd-click always starts a curve from the anchor under the cursor,
+  // even one of the selected curve's own.
+  if (forceStart) {
+    const start = anchorStartAt(evt);
+    if (start) { beginDrawAt(start); return; }
+  }
+
   const handleHit = hitTestHandle(evt);
   if (handleHit) {
-    dragCtx = { kind: "handle", curve: handleHit.curve, key: handleHit.key };
-    window.addEventListener("mousemove", onWindowMouseMove);
-    window.addEventListener("mouseup", onWindowMouseUp);
+    startWindowDrag({ kind: "handle", curve: handleHit.curve, key: handleHit.key, moved: false });
     return;
   }
 
-  const pt = toSvgPoint(evt);
+  const anchorHit = hitTestAnchor(evt);
+  if (anchorHit) {
+    startWindowDrag({ kind: "anchor", curve: anchorHit.curve, anchor: anchorHit.anchor, moved: false });
+    return;
+  }
+
+  const start = anchorStartAt(evt);
+  if (start) { hideHint(); beginDrawAt(start); return; }
+
   const curveHit = hitTestCurve(pt);
   if (curveHit) {
     hideHint();
@@ -1685,80 +2071,147 @@ function onStageMouseDown(evt) {
       idsToMove = [curveHit.id];
     }
     const curves = idsToMove.map(id => state.curves.find(cv => cv.id === id)).filter(Boolean);
-    dragCtx = {
+    svg.style.cursor = "grabbing";
+    startWindowDrag({
       kind: "curve",
       curves,
       clickedId: curveHit.id,
       start: pt,
+      startClient: { x: evt.clientX, y: evt.clientY },
       moved: false,
       orig: curves.map(c => ({ p0: { ...c.p0 }, c1: { ...c.c1 }, c2: { ...c.c2 }, p3: { ...c.p3 } })),
-    };
-    svg.style.cursor = "grabbing";
-    window.addEventListener("mousemove", onWindowMouseMove);
-    window.addEventListener("mouseup", onWindowMouseUp);
+    });
     return;
   }
 
-  // empty grid point: start a new curve
-  const p = snapForDrawing(evt);
-  drawPending = p;
-  showHint("Click another grid point to finish the curve. Esc to cancel.", true);
+  // empty canvas: start a new curve
+  hideHint();
+  beginDrawAt(snapPoint(evt, null));
+}
+
+function redrawDuringDrag() {
+  renderHandles();
+  curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
+}
+
+function snapRingMarkup(snap) {
+  if (!snap || !snap.link) return "";
+  const s = currentScale();
+  return `<circle cx="${snap.x}" cy="${snap.y}" r="${11 / s}" fill="none" stroke="#c14bff" stroke-width="${2 / s}"></circle>`;
 }
 
 function onWindowMouseMove(evt) {
   if (!dragCtx) return;
   if (dragCtx.kind === "curve") {
     const raw = toSvgPoint(evt);
-    const res = state.grid.resolution;
-    const { width: W, height: H } = state.grid;
-    const { orig } = dragCtx;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const o of orig) {
-      for (const p of [o.p0, o.c1, o.c2, o.p3]) {
-        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    if (!dragCtx.moved) {
+      if (Math.hypot(evt.clientX - dragCtx.startClient.x, evt.clientY - dragCtx.startClient.y) < DRAG_THRESHOLD_PX) return;
+      dragCtx.moved = true;
+      // A dragged curve leaves the anchors it was attached to, unless their
+      // host is being dragged along with it.
+      const dragged = new Set(dragCtx.curves.map(c => c.id));
+      for (const c of dragCtx.curves) {
+        for (const end of ["p0", "p3"]) {
+          if (c.links && c.links[end] && !dragged.has(c.links[end].curve)) setLink(c, end, null);
+        }
       }
     }
-    let dx = Math.round((raw.x - dragCtx.start.x) / res) * res;
-    let dy = Math.round((raw.y - dragCtx.start.y) / res) * res;
-    dx = Math.max(-minX, Math.min(W - maxX, dx));
-    dy = Math.max(-minY, Math.min(H - maxY, dy));
-    dragCtx.moved = dx !== 0 || dy !== 0;
+    let dx = raw.x - dragCtx.start.x, dy = raw.y - dragCtx.start.y;
+    if (state.grid.snap && !evt.altKey) {
+      // Whole-step moves that keep the group on the page.
+      const res = state.grid.resolution, { width: W, height: H } = state.grid;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const o of dragCtx.orig) {
+        for (const p of [o.p0, o.c1, o.c2, o.p3]) {
+          minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+          minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+        }
+      }
+      dx = Math.max(-minX, Math.min(W - maxX, Math.round(dx / res) * res));
+      dy = Math.max(-minY, Math.min(H - maxY, Math.round(dy / res) * res));
+    }
     dragCtx.curves.forEach((c, i) => {
-      const o = orig[i];
+      const o = dragCtx.orig[i];
       c.p0 = { x: o.p0.x + dx, y: o.p0.y + dy };
       c.c1 = { x: o.c1.x + dx, y: o.c1.y + dy };
       c.c2 = { x: o.c2.x + dx, y: o.c2.y + dy };
       c.p3 = { x: o.p3.x + dx, y: o.p3.y + dy };
     });
-    renderHandles();
-    curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
+    resolveLinks(); // curves attached to the dragged ones come along
+    redrawDuringDrag();
     return;
   }
-  const raw = toSvgPoint(evt);
-  const tol = 11 / currentScale();
-  const near = findNearVertex(raw, tol);
-  const p = near || snapToGrid(raw.x, raw.y, state.grid.resolution, state.grid.width, state.grid.height);
-  dragCtx.curve[dragCtx.key] = p;
-  renderHandles();
-  curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
+  dragCtx.moved = true;
+  if (dragCtx.kind === "anchor") {
+    const s = nearestS(dragCtx.curve, toSvgPoint(evt));
+    dragCtx.anchor.s = Math.max(0.001, Math.min(0.999, s));
+    resolveLinks();
+    redrawDuringDrag();
+    return;
+  }
+  const c = dragCtx.curve, key = dragCtx.key;
+  if (key === "p0" || key === "p3") {
+    // An endpoint snaps to (and links with) other curves' anchors; anywhere
+    // else it is free and any previous link is dropped.
+    const snap = snapPoint(evt, c.id);
+    const ctrl = key === "p0" ? "c1" : "c2";
+    c[ctrl] = { x: c[ctrl].x + snap.x - c[key].x, y: c[ctrl].y + snap.y - c[key].y };
+    c[key] = { x: snap.x, y: snap.y };
+    setLink(c, key, snap.link || null);
+    previewLayer.innerHTML = snapRingMarkup(snap);
+  } else {
+    const p = evt.altKey ? toSvgPoint(evt) : gridSnapOrRaw(toSvgPoint(evt));
+    c[key] = { x: p.x, y: p.y };
+  }
+  resolveLinks();
+  redrawDuringDrag();
 }
 
 function onWindowMouseUp() {
   if (!dragCtx) return;
-  const wasNoOpCurveDrag = dragCtx.kind === "curve" && !dragCtx.moved;
+  const wasNoOpDrag = !dragCtx.moved;
   // A plain click (no drag) on one member of a multi-selection re-focuses
   // just that curve, so it can be selected individually without Shift.
-  if (wasNoOpCurveDrag && dragCtx.curves.length > 1) {
+  if (wasNoOpDrag && dragCtx.kind === "curve" && dragCtx.curves.length > 1) {
     setSelection({ type: "curve", id: dragCtx.clickedId });
   }
+  if (dragCtx.kind === "anchor") ensureAnchors(dragCtx.curve);
   dragCtx = null;
+  previewLayer.innerHTML = "";
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
   if (state.tool === "curve") svg.style.cursor = "default";
-  if (wasNoOpCurveDrag) return;
+  if (wasNoOpDrag) return;
   render();
   pushHistory();
+}
+
+// Double-click on the selected curve adds an anchor there; on one of its free
+// anchors it removes that anchor. Detected from consecutive mousedowns because
+// selecting re-renders the canvas, which stops the browser firing "dblclick".
+// Returns whether the click was consumed.
+let lastMouseDown = { t: -Infinity, x: 0, y: 0 };
+function handleDoubleClick(evt) {
+  const now = performance.now();
+  const isDouble = now - lastMouseDown.t < 350 && Math.hypot(evt.clientX - lastMouseDown.x, evt.clientY - lastMouseDown.y) < 5;
+  lastMouseDown = { t: isDouble ? -Infinity : now, x: evt.clientX, y: evt.clientY };
+  if (!isDouble || drawPending || now - lastCurveCreatedAt < 600) return false;
+  if (!state.selection || state.selection.type !== "curve") return false;
+  const c = state.curves.find(cv => cv.id === state.selection.id);
+  if (!c) return false;
+  const anchorHit = hitTestAnchor(evt);
+  if (anchorHit) {
+    c.anchors = c.anchors.filter(a => a !== anchorHit.anchor);
+  } else {
+    const pt = toSvgPoint(evt);
+    if (distToPolyline(pt, flattenCubic(c.p0, c.c1, c.c2, c.p3, FLATTEN_SEGMENTS)) > 8 / currentScale()) return false;
+    addAnchor(c, nearestS(c, pt));
+  }
+  ensureAnchors(c);
+  resolveLinks();
+  render();
+  pushHistory();
+  return true;
 }
 
 // Drawn into previewLayer, never handlesLayer, so this hover-only feedback
@@ -1769,23 +2222,37 @@ function onStageMouseMove(evt) {
     const s = currentScale();
     const rA = 7 / s, lw = 1 / s;
     if (drawPending) {
-      const p = snapForDrawing(evt);
+      const p = snapPoint(evt, null);
       const { c1, c2 } = defaultCurveBetween(drawPending, p, state.grid.resolution);
       const preview = `M ${drawPending.x} ${drawPending.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p.x} ${p.y}`;
       previewLayer.innerHTML =
+        snapRingMarkup(drawPending) +
         `<circle cx="${drawPending.x}" cy="${drawPending.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}"></circle>` +
         `<path d="${preview}" fill="none" stroke="#5b8cff" stroke-width="${1.6/s}" stroke-dasharray="${4/s},${3/s}"></path>` +
+        snapRingMarkup(p) +
         `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#e6453c" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
       return;
     }
-    if (hitTestHandle(evt) || hitTestCurve(toSvgPoint(evt))) {
+    if (hitTestHandle(evt) || hitTestAnchor(evt)) {
+      svg.style.cursor = "grab";
+      previewLayer.innerHTML = "";
+      return;
+    }
+    const start = anchorStartAt(evt);
+    if (start) {
+      svg.style.cursor = "crosshair";
+      previewLayer.innerHTML = snapRingMarkup(start) +
+        `<circle cx="${start.x}" cy="${start.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
+      return;
+    }
+    if (hitTestCurve(toSvgPoint(evt))) {
       svg.style.cursor = "grab";
       previewLayer.innerHTML = "";
       return;
     }
     svg.style.cursor = "crosshair";
-    const p = snapForDrawing(evt);
-    previewLayer.innerHTML =
+    const p = snapPoint(evt, null);
+    previewLayer.innerHTML = snapRingMarkup(p) +
       `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
     return;
   }
@@ -1804,7 +2271,7 @@ function setTool(tool) {
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
   svg.style.cursor = "default";
   if (tool === "curve") {
-    showHint("Click an existing curve to select it, or an empty grid point to draw a new one.", true);
+    showHint("Click a curve to select it, or click empty canvas (or an anchor) to start a new one.", true);
   }
   render();
 }
@@ -1823,6 +2290,7 @@ document.addEventListener("keydown", evt => {
     if (document.activeElement && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
     const idSet = new Set(state.selection.type === "curve" ? [state.selection.id] : state.selection.ids);
     state.curves = state.curves.filter(cv => !idSet.has(cv.id));
+    resolveLinks();
     state.selection = null;
     render(); pushHistory();
   } else if ((evt.key === "]" || evt.key === "}") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
