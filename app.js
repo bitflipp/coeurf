@@ -1507,11 +1507,13 @@ function reorderSelection(direction) {
 
 function renderMultiCurvePanel() {
   const ids = state.selection.ids;
-  const count = ids.filter(id => state.curves.some(cv => cv.id === id)).length;
+  const selCurves = state.curves.filter(cv => ids.includes(cv.id));
+  const count = selCurves.length;
   panel.innerHTML = `
     ${symbolTemplateNote(state.curves.filter(cv => ids.includes(cv.id)))}
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
     <div class="panel-section" style="margin-top:16px">
+      <div class="field-row"><label title="Leave the selected curves out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export-multi" ${selCurves.length && selCurves.every(cv => cv.noExport) ? "checked" : ""}></div>
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol-multi")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
@@ -1524,7 +1526,11 @@ function renderMultiCurvePanel() {
       </div>
     </div>
   `;
-  wireMakeSymbolButton("f-make-symbol-multi", state.curves.filter(cv => ids.includes(cv.id)));
+  wireMakeSymbolButton("f-make-symbol-multi", selCurves);
+  document.getElementById("f-no-export-multi").addEventListener("change", e => {
+    for (const cv of selCurves) { if (e.target.checked) cv.noExport = true; else delete cv.noExport; }
+    pushHistory();
+  });
   document.getElementById("f-to-front-multi").addEventListener("click", () => reorderSelection("front"));
   document.getElementById("f-forward-multi").addEventListener("click", () => reorderSelection("forward"));
   document.getElementById("f-backward-multi").addEventListener("click", () => reorderSelection("backward"));
@@ -1864,6 +1870,7 @@ function renderCurvePanel() {
         <button class="icon-btn" id="f-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
         <button class="icon-btn" id="f-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
       </div>
+      <div class="field-row"><label title="Leave this curve out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export" ${c.noExport ? "checked" : ""}></div>
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
@@ -1876,6 +1883,10 @@ function renderCurvePanel() {
   `;
   mountAnchorFields(c);
   wireMakeSymbolButton("f-make-symbol", [c]);
+  document.getElementById("f-no-export").addEventListener("change", e => {
+    if (e.target.checked) c.noExport = true; else delete c.noExport;
+    pushHistory();
+  });
 
   document.getElementById("f-to-front").addEventListener("click", () => reorderSelection("front"));
   document.getElementById("f-forward").addEventListener("click", () => reorderSelection("forward"));
@@ -2987,7 +2998,7 @@ document.getElementById("import-input").addEventListener("change", evt => {
 
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
-  const curveA = curvesMarkup(state.curves, false);
+  const curveA = curvesMarkup(state.curves.filter(c => !c.noExport), false);
   const curves = curveA.body + borderMarkup();
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +

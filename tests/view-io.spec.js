@@ -132,6 +132,18 @@ test.describe("export, download and import", () => {
     expect(ok).toBe(true);
   });
 
+  test("Curves marked Exclude from SVG are left out of the export", async ({ app }) => {
+    await app.load(sample);
+    await app.page.click("#tool-curve");
+    await app.click(200, 150);
+    await app.page.check("#f-no-export");
+    expect((await app.curves()).find(c => c.id === "a").noExport).toBe(true);
+    const [dl] = await Promise.all([app.page.waitForEvent("download"), app.page.click("#export-btn")]);
+    const svg = fs.readFileSync(await dl.path(), "utf8");
+    expect(svg).not.toContain("#e6453c");
+    expect(svg).toContain("<linearGradient");
+  });
+
   test("Download saves a JSON file that Import restores", async ({ app }) => {
     await app.load(sample);
     const [dl] = await Promise.all([app.page.waitForEvent("download"), app.page.click("#download-btn")]);
