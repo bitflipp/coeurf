@@ -12,6 +12,7 @@ Points can snap to a grid, but every curve also carries anchors that other curve
 - **Circle tool**: drag from the center to draw a circle as four joined quarter-arc Bézier curves (about 0.03% radial error), snapped like any other point
 - **Anchors**: each curve has start/end anchors plus any number of extra ones, placed by arc length. Add them with presets (mid, thirds, quarters, divide evenly), the panel, or by double-clicking the selected curve; drag to slide, double-click to remove
 - **Attached curves**: endpoints snap to other curves' anchors and stay attached, so moving, reshaping or sliding the host drags attached curves along. Optional *tangent* anchors also lock the attached curve's control point onto the host's tangent
+- **Symbols**: select curves (a leaf, say) and press *Make symbol*, then place copies with the Symbol tool by clicking a start and an end point. Each instance is rotated and scaled to fit between its two pins (optionally mirrored), pins snap and stay attached to anchors, and editing the template curves updates every instance
 - **Curve styling**: solid or gradient colors, per-stop opacity, and tapered strokes
 - **Palette**: a shared palette is the single source of colors for all other tools
 - **Arrange and mirror**: reorder curves (front/back), mirror a curve across its own endpoints, or across the page's horizontal or vertical axis
@@ -37,11 +38,18 @@ Then visit <http://localhost:8000>.
 - Dragging a curve detaches the ends that were attached to curves left behind. Select host and child together to move them as one. The curve panel lists attachments and can detach them.
 - Anchors take priority over the grid. Grid snapping is toggled in the Grid tool.
 
+### Symbols
+
+- Select the curves of a shape with the Curve tool (Shift-click for several) and press **Make symbol**. The two most distant endpoints become its start and end pins; for a leaf, that is the shared start and end. The curves stay on the canvas as the *template*.
+- In the Symbol tool, click a start point and an end point. Both snap to anchors (and stay attached to them) unless you hold `Alt`. *Mirrored* places the reflected shape.
+- In the Curve tool, click an instance to select it, drag it to move it, or drag one of its pins to rotate and scale it or attach it to another anchor. Instances can be duplicated, detached into plain curves, or reordered.
+- Deleting a template curve dissolves its symbol; the instances remain as plain curves.
+
 ### Shortcuts
 
 | Key | Action |
 |---|---|
-| `P` / `G` / `L` / `C` / `O` | Page / Grid / Palette / Curve / Circle tool |
+| `P` / `G` / `L` / `C` / `O` / `S` | Page / Grid / Palette / Curve / Circle / Symbol tool |
 | `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` | Undo / redo |
 | `]` / `[` | Bring forward / send backward (hold `Shift` for front / back) |
 | `Delete` / `Backspace` | Delete the selected curve |

@@ -113,12 +113,14 @@ button:disabled { opacity: 0.4; cursor: default; }
 #tool-buttons {
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-3);
   border-bottom: 1px solid var(--border);
 }
 #tool-buttons .tool-btn {
   flex: 1;
+  min-width: max-content; /* tools wrap onto a second row when the dock is narrow */
   padding: var(--sp-2);
 }
 
@@ -150,6 +152,18 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: var(--text-dim);
   line-height: 1.5;
   font-size: 13.5px;
+}
+
+.panel-note {
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--accent-dim);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  color: #cfdcff;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .panel-section + .panel-section {
@@ -259,6 +273,7 @@ input.hex-in {
 
 .action-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
 }
 .action-row + .action-row {
@@ -269,7 +284,9 @@ input.hex-in {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  min-width: max-content; /* labelled buttons wrap onto the next line instead of overflowing */
+  white-space: nowrap;
   color: var(--text-dim);
 }
 .icon-btn:hover { color: var(--text); }
