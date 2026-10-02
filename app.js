@@ -226,7 +226,7 @@ function setLink(c, end, link) {
 // until stable; dangling links (deleted curve/anchor) are dropped.
 function resolveLinks() {
   for (let pass = 0; pass <= state.curves.length; pass++) {
-    let changed = false;
+    let changed = syncInstances();
     for (const c of state.curves) {
       if (!c.links) continue;
       for (const end of ["p0", "p3"]) {
@@ -263,11 +263,174 @@ function resolveLinks() {
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Symbols & instances                                                     */
+/*                                                                          */
+/* A symbol is a set of ordinary "template" curves plus two pins (anchors on  */
+/* them). An instance places the symbol between two points a and b by a     */
+/* similarity transform (rotate + uniform scale, optionally mirrored across */
+/* the pin chord), so moving a pin rotates and scales the whole instance.   */
+/* Instances are materialized as read-only curves in state.curves (flagged  */
+/* `inst`, `ix`) so rendering, export and anchor snapping need no special   */
+/* cases; syncInstances() regenerates them from the templates. Each pin can   */
+/* be linked to an anchor like a curve endpoint (`inst.links.a / b`).       */
+/* ---------------------------------------------------------------------- */
+
+const INSTANCE_STYLE_KEYS = ["width", "width2", "drift", "color", "colorMode", "color2", "gradientAngle", "opacity", "opacityMode", "opacity2", "opacityAngle"];
+
+function symbolPins(sym) {
+  const pin = p => {
+    const host = state.curves.find(c => c.id === p.curve);
+    const anchor = host && !host.inst && host.anchors.find(a => a.id === p.anchor);
+    return anchor ? curveFrame(host, anchor.s) : null;
+  };
+  const a = pin(sym.pinA), b = pin(sym.pinB);
+  return a && b && Math.hypot(b.x - a.x, b.y - a.y) > 1e-6 ? { a, b } : null;
+}
+
+function symbolTemplates(sym) {
+  const templates = sym.curves.map(id => state.curves.find(c => c.id === id));
+  return templates.every(c => c && !c.inst) ? templates : null;
+}
+
+// Curves for an instance of `sym` between points a and b. `idPrefix` makes
+// the ids stable across rebuilds, so links to an instance's anchors survive.
+function buildInstanceCurves(sym, a, b, flip, idPrefix, instId) {
+  const pins = symbolPins(sym), templates = symbolTemplates(sym);
+  if (!pins || !templates) return null;
+  const ct = { x: pins.b.x - pins.a.x, y: pins.b.y - pins.a.y };
+  const ci = { x: b.x - a.x, y: b.y - a.y };
+  const lt = Math.hypot(ct.x, ct.y), li = Math.hypot(ci.x, ci.y);
+  if (li < 1e-6) return null;
+  const u = { x: ct.x / lt, y: ct.y / lt };
+  const m = { x: (ci.x * ct.x + ci.y * ct.y) / (lt * lt), y: (ci.y * ct.x - ci.x * ct.y) / (lt * lt) };
+  const k = Math.hypot(m.x, m.y);
+  const phiT = Math.atan2(ct.y, ct.x) * 180 / Math.PI;
+  const rot = Math.atan2(m.y, m.x) * 180 / Math.PI;
+  const map = p => {
+    let vx = p.x - pins.a.x, vy = p.y - pins.a.y;
+    if (flip) { // v -> u^2 * conj(v): reflection across the template chord
+      const ux = u.x * u.x - u.y * u.y, uy = 2 * u.x * u.y;
+      [vx, vy] = [ux * vx + uy * vy, uy * vx - ux * vy];
+    }
+    return { x: a.x + m.x * vx - m.y * vy, y: a.y + m.x * vy + m.y * vx };
+  };
+  const angle = th => ((flip ? 2 * phiT - th : th) + rot) % 360;
+  return templates.map((c, i) => {
+    const o = { id: `${idPrefix}:${i}`, inst: instId, ix: i,
+      p0: map(c.p0), c1: map(c.c1), c2: map(c.c2), p3: map(c.p3),
+      anchors: JSON.parse(JSON.stringify(c.anchors)) };
+    for (const key of INSTANCE_STYLE_KEYS) if (c[key] != null) o[key] = c[key];
+    o.width = c.width * k;
+    if (c.width2 != null) o.width2 = c.width2 * k;
+    if (c.gradientAngle != null) o.gradientAngle = angle(c.gradientAngle);
+    if (c.opacityAngle != null) o.opacityAngle = angle(c.opacityAngle);
+    return o;
+  });
+}
+
+// Turns a symbol's instances into plain curves (they keep their ids and
+// links) and forgets the instances; the symbol itself is left to the caller.
+function bakeInstances(pred) {
+  for (const inst of state.instances.filter(pred)) {
+    for (const c of state.curves) if (c.inst === inst.id) { delete c.inst; delete c.ix; }
+  }
+  state.instances = state.instances.filter(i => !pred(i));
+}
+
+function removeSymbol(id) {
+  bakeInstances(i => i.symbol === id);
+  state.symbols = state.symbols.filter(s => s.id !== id);
+}
+
+// Brings the materialized curves in line with the templates and instances.
+// Returns whether a linked pin moved. Symbols whose templates or pins are gone
+// are dissolved, and their instances kept as plain curves.
+function syncInstances() {
+  for (const sym of state.symbols.slice()) {
+    if (!symbolTemplates(sym) || !symbolPins(sym)) removeSymbol(sym.id);
+  }
+  let moved = false;
+  const live = new Set();
+  for (const inst of state.instances) {
+    for (const end of ["a", "b"]) {
+      const l = inst.links && inst.links[end];
+      if (!l) continue;
+      const host = state.curves.find(c => c.id === l.curve);
+      const anchor = host && host.inst !== inst.id && host.anchors.find(x => x.id === l.anchor);
+      if (!anchor) { delete inst.links[end]; continue; }
+      const f = curveFrame(host, anchor.s);
+      if (Math.abs(f.x - inst[end].x) > LINK_EPS || Math.abs(f.y - inst[end].y) > LINK_EPS) {
+        inst[end] = { x: f.x, y: f.y };
+        moved = true;
+      }
+    }
+    if (inst.links && !inst.links.a && !inst.links.b) delete inst.links;
+    const sym = state.symbols.find(s => s.id === inst.symbol);
+    const built = sym && buildInstanceCurves(sym, inst.a, inst.b, !!inst.flip, inst.id, inst.id);
+    if (!built) continue;
+    for (const c of built) {
+      live.add(c.id);
+      const at = state.curves.findIndex(o => o.id === c.id);
+      if (at >= 0) state.curves[at] = c; else state.curves.push(c);
+    }
+  }
+  state.curves = state.curves.filter(c => !c.inst || live.has(c.id));
+  return moved;
+}
+
+// Makes a symbol from curves, pinned at the two most distant endpoints
+// (for a leaf, its shared start and end).
+function makeSymbol(curves) {
+  const ends = [];
+  for (const c of curves) {
+    ends.push({ curve: c.id, anchor: "start", p: c.p0 }, { curve: c.id, anchor: "end", p: c.p3 });
+  }
+  let best = null, bestD = 1e-6;
+  for (let i = 0; i < ends.length; i++) {
+    for (let j = i + 1; j < ends.length; j++) {
+      const d = Math.hypot(ends[i].p.x - ends[j].p.x, ends[i].p.y - ends[j].p.y);
+      if (d > bestD + 1e-9) { bestD = d; best = [ends[i], ends[j]]; }
+    }
+  }
+  if (!best) return null;
+  const sym = {
+    id: "s" + (state.curveIdCounter++), name: "Symbol " + (state.symbols.length + 1),
+    curves: curves.map(c => c.id),
+    pinA: { curve: best[0].curve, anchor: best[0].anchor },
+    pinB: { curve: best[1].curve, anchor: best[1].anchor },
+  };
+  state.symbols.push(sym);
+  return sym;
+}
+
+function newInstance(sym, snapA, snapB, flip) {
+  const inst = { id: "i" + (state.curveIdCounter++), symbol: sym.id, flip: !!flip,
+    a: { x: snapA.x, y: snapA.y }, b: { x: snapB.x, y: snapB.y } };
+  if (snapA.link) setInstanceLink(inst, "a", snapA.link);
+  if (snapB.link) setInstanceLink(inst, "b", snapB.link);
+  state.instances.push(inst);
+  resolveLinks();
+  return inst;
+}
+
+function setInstanceLink(inst, end, link) {
+  if (link) {
+    inst.links = inst.links || {};
+    inst.links[end] = { curve: link.curve, anchor: link.anchor };
+  } else if (inst.links) {
+    delete inst.links[end];
+    if (!inst.links.a && !inst.links.b) delete inst.links;
+  }
+}
+
+function instanceCurveIds(id) { return state.curves.filter(c => c.inst === id).map(c => c.id); }
+
 // Nearest anchor (of any curve but `excludeId`) within `tol`, as a snap target.
 function findNearAnchor(pt, tol, excludeId) {
   let best = null, bestD = tol;
   for (const c of state.curves) {
-    if (c.id === excludeId) continue;
+    if (c.id === excludeId || (c.inst && c.inst === excludeId)) continue;
     for (const a of c.anchors) {
       const f = curveFrame(c, a.s);
       const d = Math.hypot(f.x - pt.x, f.y - pt.y);
@@ -295,19 +458,24 @@ const state = {
   grid: { width: 800, height: 600, resolution: 20, snap: true, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
   curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
-  selection: null,    // {type:'curve', id} | {type:'curves', ids}
-  tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle"
+  selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'instance', id}
+  tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle" | "symbol"
+  symbols: [],       // {id, name, curves: [templateIds], pinA/pinB: {curve, anchor}}
+  instances: [],     // {id, symbol, a, b, flip, links?: {a?, b?}}
   curveIdCounter: 1,
 };
 
 const BLANK_DESIGN = JSON.parse(JSON.stringify({
-  grid: state.grid, palette: state.palette, curves: [], curveIdCounter: 1,
+  grid: state.grid, palette: state.palette, curves: [], symbols: [], instances: [], curveIdCounter: 1,
 }));
 
 let drawPending = null; // {x,y,link?} start point while placing a new curve
 let circlePending = null; // {x,y} center while sizing a new circle (Circle tool)
 let lastCurveCreatedAt = -Infinity; // guards the dblclick that follows a quick two-click draw
 let dragCtx = null;    // active drag context
+let symbolPending = null; // {x,y,link?} start pin while placing a symbol instance (Symbol tool)
+let activeSymbolId = null; // symbol the Symbol tool places
+let symbolFlip = false;    // whether the Symbol tool places mirrored instances
 
 // Which sub-panel the Page tool shows - purely a UI concern (like `zoom`),
 // so it's kept out of `state` and never saved/undone.
@@ -418,6 +586,8 @@ function cloneState() {
     grid: state.grid,
     palette: state.palette,
     curves: state.curves,
+    symbols: state.symbols,
+    instances: state.instances,
     curveIdCounter: state.curveIdCounter,
   }));
 }
@@ -437,6 +607,8 @@ function restoreFromSnapshot(snap) {
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
   for (const c of state.curves) ensureAnchors(c);
+  state.symbols = JSON.parse(JSON.stringify(snap.symbols || []));
+  state.instances = JSON.parse(JSON.stringify(snap.instances || []));
   resolveLinks();
   state.palette = Array.isArray(snap.palette) ? snap.palette.slice() : paletteFromUsedColors(snap);
   state.curveIdCounter = snap.curveIdCounter;
@@ -810,6 +982,7 @@ function isCurveSelected(id) {
   if (!state.selection) return false;
   if (state.selection.type === "curve") return state.selection.id === id;
   if (state.selection.type === "curves") return state.selection.ids.includes(id);
+  if (state.selection.type === "instance") return id.startsWith(state.selection.id + ":");
   return false;
 }
 
@@ -939,7 +1112,7 @@ function anchorMarkup(c, a, r, s, opacity, fill) {
 
 function renderHandles() {
   handlesLayer.innerHTML = "";
-  if (state.tool !== "curve") return;
+  if (state.tool !== "curve" && state.tool !== "symbol") return; // symbols snap to anchors too
   const s = currentScale();
   let html = "";
   // Every curve shows its anchors faintly so snap targets are visible; the
@@ -947,6 +1120,14 @@ function renderHandles() {
   for (const c of state.curves) {
     if (state.selection && state.selection.type === "curve" && state.selection.id === c.id) continue;
     for (const a of c.anchors) html += anchorMarkup(c, a, 4 / s, s, 0.55, "#c14bff");
+  }
+  const inst = state.selection && state.selection.type === "instance" && state.instances.find(i => i.id === state.selection.id);
+  if (inst) {
+    html += `<line x1="${inst.a.x}" y1="${inst.a.y}" x2="${inst.b.x}" y2="${inst.b.y}" stroke="#5b8cff" stroke-width="${1.6 / s}" stroke-dasharray="${3 / s},${3 / s}"></line>`;
+    for (const [key, fill] of [["a", "#2ecc71"], ["b", "#e6453c"]]) {
+      const linked = inst.links && inst.links[key];
+      html += `<circle class="handle" cx="${inst[key].x}" cy="${inst[key].y}" r="${7 / s}" fill="${fill}" stroke="${linked ? "#ffffff" : "#1b1d22"}" stroke-width="${(linked ? 2.2 : 1) / s}" data-handle="${key}"></circle>`;
+    }
   }
   const c = state.selection && state.selection.type === "curve" && state.curves.find(cv => cv.id === state.selection.id);
   if (c) {
@@ -973,6 +1154,7 @@ function renderHandles() {
 // the very <input type="color"> the OS picker is attached to and cut the drag
 // short.
 function renderCanvas() {
+  syncInstances(); // template edits (color, width, ...) reach every instance
   const { width: W, height: H } = state.grid;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("width", W * zoom);
@@ -1130,15 +1312,157 @@ function renderPanel() {
     panel.innerHTML = `<div class="panel-empty">Drag from the center outwards to draw a circle.<br>It is made of four quarter-arc curves, joined end to end and left selected so you can move or style them.</div>`;
     return;
   }
+  if (state.tool === "symbol") { renderSymbolToolPanel(); return; }
   if (!state.selection) {
     panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click anywhere empty to draw one.</div>`;
     return;
   }
   if (state.selection.type === "curve") {
     renderCurvePanel();
+  } else if (state.selection.type === "instance") {
+    renderInstancePanel();
   } else {
     renderMultiCurvePanel();
   }
+}
+
+// Make-symbol button shared by the single and multi-curve panels.
+function makeSymbolButtonHtml(id) {
+  return `<button class="icon-btn" id="${id}" title="Make symbol: turn the selected curves into a reusable symbol (a leaf, say) that can be placed between any two points. The curves stay as its template: editing them updates every instance.">&#10070; Make symbol</button>`;
+}
+
+function wireMakeSymbolButton(id, curves) {
+  document.getElementById(id).addEventListener("click", () => {
+    if (curves.some(c => c.inst)) { showHint("Instances can't be made into symbols; use their template curves."); return; }
+    if (state.symbols.some(sym => sym.curves.some(cid => curves.some(c => c.id === cid)))) {
+      showHint("These curves already belong to a symbol.");
+      return;
+    }
+    const sym = makeSymbol(curves);
+    if (!sym) { showHint("A symbol needs curves with two distinct endpoints."); return; }
+    activeSymbolId = sym.id;
+    pushHistory();
+    setTool("symbol");
+    showHint(`${sym.name} made. Click two points to place it; the first click is the start pin, the second the end pin.`);
+  });
+}
+
+function symbolTemplateNote(curves) {
+  const sym = state.symbols.find(sy => sy.curves.some(cid => curves.some(c => c.id === cid)));
+  if (!sym) return "";
+  const n = state.instances.filter(i => i.symbol === sym.id).length;
+  return `<div class="panel-note">Template of <b>${escapeAttr(sym.name)}</b> (${n} instance${n === 1 ? "" : "s"})</div>`;
+}
+
+function renderSymbolToolPanel() {
+  if (!state.symbols.length) {
+    panel.innerHTML = `<div class="panel-empty">No symbols yet.<br>Draw a shape (a leaf: two curves sharing start and end), select its curves with the Curve tool and press <b>Make symbol</b>.</div>`;
+    return;
+  }
+  if (!state.symbols.some(sy => sy.id === activeSymbolId)) activeSymbolId = state.symbols[0].id;
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Symbol</h3>
+      ${state.symbols.map(sy => {
+        const n = state.instances.filter(i => i.symbol === sy.id).length;
+        return `<div class="field-row symbol-row" data-symbol="${sy.id}">
+          <input type="radio" name="sym" ${sy.id === activeSymbolId ? "checked" : ""} title="Place this symbol">
+          <input type="text" class="sym-name" value="${escapeAttr(sy.name)}">
+          <span class="unit">&times;${n}</span>
+          <button class="icon-btn danger sym-del" title="Dissolve this symbol: its instances stay as plain curves, the template curves are untouched.">${ICON_TRASH}</button>
+        </div>`;
+      }).join("")}
+      <div class="field-row"><label>Mirrored</label><input type="checkbox" id="sym-flip" ${symbolFlip ? "checked" : ""}></div>
+    </div>
+    <div class="panel-empty">Click a start point, then an end point. Either snaps to anchors and stays attached to them; hold Alt to place freely. Esc cancels.</div>`;
+  for (const row of panel.querySelectorAll(".symbol-row")) {
+    const sym = state.symbols.find(sy => sy.id === row.dataset.symbol);
+    row.querySelector('input[type="radio"]').addEventListener("change", () => { activeSymbolId = sym.id; });
+    row.querySelector(".sym-name").addEventListener("change", e => {
+      sym.name = e.target.value.trim() || sym.name;
+      pushHistory();
+    });
+    row.querySelector(".sym-del").addEventListener("click", () => {
+      removeSymbol(sym.id);
+      resolveLinks();
+      render();
+      pushHistory();
+    });
+  }
+  document.getElementById("sym-flip").addEventListener("change", e => { symbolFlip = e.target.checked; });
+}
+
+function renderInstancePanel() {
+  const inst = state.instances.find(i => i.id === state.selection.id);
+  const sym = inst && state.symbols.find(sy => sy.id === inst.symbol);
+  if (!sym) { state.selection = null; renderPanel(); return; }
+  const pinRow = (end, label) => {
+    const l = inst.links && inst.links[end];
+    const host = l && state.curves.find(c => c.id === l.curve);
+    const anchor = host && host.anchors.find(a => a.id === l.anchor);
+    return `<div class="field-row"><label>${label} ${anchor ? `attached to ${anchorLabel(host, anchor)} of ${escapeAttr(host.id)}` : "is free"}</label>` +
+      (anchor ? `<button class="detach" data-end="${end}" title="Detach: the pin stays here but no longer follows the anchor">Detach</button>` : "") + `</div>`;
+  };
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Instance of ${escapeAttr(sym.name)}</h3>
+      <div class="field-row"><label>Mirrored</label><input type="checkbox" id="i-flip" ${inst.flip ? "checked" : ""}></div>
+      ${pinRow("a", "Start pin")}
+      ${pinRow("b", "End pin")}
+      <div class="panel-empty">Drag the pins to rotate and scale it; drop one on an anchor to attach it.</div>
+    </div>
+    <div class="panel-section">
+      <h3>Actions</h3>
+      <div class="action-row">
+        <button class="icon-btn" id="i-to-front" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
+        <button class="icon-btn" id="i-forward" title="Bring forward (])">${ICON_FORWARD}</button>
+        <button class="icon-btn" id="i-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
+        <button class="icon-btn" id="i-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
+      </div>
+      <div class="action-row">
+        <button class="icon-btn" id="i-template" title="Select the template curves of this symbol">Edit template</button>
+        <button class="icon-btn" id="i-dup" title="Duplicate this instance, shifted by one grid step">Duplicate</button>
+        <button class="icon-btn" id="i-bake" title="Detach from the symbol: this instance becomes plain curves that no longer follow the template.">Detach</button>
+        <button class="icon-btn danger" id="i-delete" title="Delete this instance.">${ICON_TRASH}</button>
+      </div>
+    </div>`;
+  document.getElementById("i-to-front").addEventListener("click", () => reorderSelection("front"));
+  document.getElementById("i-forward").addEventListener("click", () => reorderSelection("forward"));
+  document.getElementById("i-backward").addEventListener("click", () => reorderSelection("backward"));
+  document.getElementById("i-to-back").addEventListener("click", () => reorderSelection("back"));
+  document.getElementById("i-flip").addEventListener("change", e => {
+    inst.flip = e.target.checked;
+    resolveLinks(); render(); pushHistory();
+  });
+  for (const b of panel.querySelectorAll(".detach")) {
+    b.addEventListener("click", () => { setInstanceLink(inst, b.dataset.end, null); render(); pushHistory(); });
+  }
+  document.getElementById("i-template").addEventListener("click", () => {
+    const ids = sym.curves.slice();
+    setSelection(ids.length === 1 ? { type: "curve", id: ids[0] } : { type: "curves", ids });
+  });
+  document.getElementById("i-dup").addEventListener("click", () => {
+    const d = state.grid.resolution;
+    const copy = newInstance(sym, { x: inst.a.x + d, y: inst.a.y + d }, { x: inst.b.x + d, y: inst.b.y + d }, inst.flip);
+    setSelection({ type: "instance", id: copy.id });
+    pushHistory();
+  });
+  document.getElementById("i-bake").addEventListener("click", () => {
+    bakeInstances(i => i.id === inst.id);
+    const ids = state.curves.filter(c => c.id.startsWith(inst.id + ":")).map(c => c.id);
+    setSelection(ids.length === 1 ? { type: "curve", id: ids[0] } : { type: "curves", ids });
+    pushHistory();
+  });
+  document.getElementById("i-delete").addEventListener("click", deleteSelectedInstance);
+}
+
+function deleteSelectedInstance() {
+  const id = state.selection.id;
+  state.instances = state.instances.filter(i => i.id !== id);
+  resolveLinks();
+  state.selection = null;
+  render();
+  pushHistory();
 }
 
 // Multiple curves selected via Shift-click: kept deliberately limited to
@@ -1154,6 +1478,7 @@ function reorderSelection(direction) {
   if (!state.selection) return;
   const ids = state.selection.type === "curve" ? [state.selection.id]
     : state.selection.type === "curves" ? state.selection.ids
+    : state.selection.type === "instance" ? instanceCurveIds(state.selection.id)
     : null;
   if (!ids || !ids.length) return;
   const idSet = new Set(ids);
@@ -1184,8 +1509,10 @@ function renderMultiCurvePanel() {
   const ids = state.selection.ids;
   const count = ids.filter(id => state.curves.some(cv => cv.id === id)).length;
   panel.innerHTML = `
+    ${symbolTemplateNote(state.curves.filter(cv => ids.includes(cv.id)))}
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
     <div class="panel-section" style="margin-top:16px">
+      <div class="action-row">${makeSymbolButtonHtml("f-make-symbol-multi")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
         <button class="icon-btn" id="f-forward-multi" title="Bring forward (])">${ICON_FORWARD}</button>
@@ -1197,6 +1524,7 @@ function renderMultiCurvePanel() {
       </div>
     </div>
   `;
+  wireMakeSymbolButton("f-make-symbol-multi", state.curves.filter(cv => ids.includes(cv.id)));
   document.getElementById("f-to-front-multi").addEventListener("click", () => reorderSelection("front"));
   document.getElementById("f-forward-multi").addEventListener("click", () => reorderSelection("forward"));
   document.getElementById("f-backward-multi").addEventListener("click", () => reorderSelection("backward"));
@@ -1487,6 +1815,7 @@ function renderCurvePanel() {
   const isTapered = c.width2 != null;
   const isOpGrad = c.opacityMode === "gradient";
   panel.innerHTML = `
+    ${symbolTemplateNote([c])}
     <div class="panel-section">
       <h3>Fill</h3>
       <div class="seg">
@@ -1535,6 +1864,7 @@ function renderCurvePanel() {
         <button class="icon-btn" id="f-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
         <button class="icon-btn" id="f-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
       </div>
+      <div class="action-row">${makeSymbolButtonHtml("f-make-symbol")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
         <button class="icon-btn" id="f-mirror-h" title="Mirror horizontal axis: add a new curve flipped top-to-bottom across the page's horizontal centerline.">${ICON_FLIP_V}</button>
@@ -1545,6 +1875,7 @@ function renderCurvePanel() {
     </div>
   `;
   mountAnchorFields(c);
+  wireMakeSymbolButton("f-make-symbol", [c]);
 
   document.getElementById("f-to-front").addEventListener("click", () => reorderSelection("front"));
   document.getElementById("f-forward").addEventListener("click", () => reorderSelection("forward"));
@@ -1921,6 +2252,19 @@ function hitTestHandle(evt) {
   return best ? { curve: c, key: best } : null;
 }
 
+function hitTestPin(evt) {
+  if (!state.selection || state.selection.type !== "instance") return null;
+  const inst = state.instances.find(i => i.id === state.selection.id);
+  if (!inst) return null;
+  const pt = toSvgPoint(evt);
+  let best = null, bestD = 10 / currentScale();
+  for (const key of ["a", "b"]) {
+    const d = Math.hypot(inst[key].x - pt.x, inst[key].y - pt.y);
+    if (d < bestD) { bestD = d; best = { inst, key }; }
+  }
+  return best;
+}
+
 function setSelection(sel) {
   state.selection = sel;
   render();
@@ -2169,6 +2513,7 @@ function onStageMouseDown(evt) {
   if (evt.button !== 0) return;
 
   if (state.tool === "circle") { onCircleMouseDown(evt); return; }
+  if (state.tool === "symbol") { onSymbolMouseDown(evt); return; }
   if (state.tool !== "curve") return;
   if (handleDoubleClick(evt)) return;
 
@@ -2206,6 +2551,12 @@ function onStageMouseDown(evt) {
     return;
   }
 
+  const pinHit = hitTestPin(evt);
+  if (pinHit) {
+    startWindowDrag({ kind: "pin", inst: pinHit.inst, key: pinHit.key, moved: false });
+    return;
+  }
+
   const anchorHit = hitTestAnchor(evt);
   if (anchorHit) {
     startWindowDrag({ kind: "anchor", curve: anchorHit.curve, anchor: anchorHit.anchor, moved: false });
@@ -2216,6 +2567,17 @@ function onStageMouseDown(evt) {
   if (start) { hideHint(); beginDrawAt(start); return; }
 
   const curveHit = hitTestCurve(pt);
+  if (curveHit && curveHit.inst) {
+    hideHint();
+    const inst = state.instances.find(i => i.id === curveHit.inst);
+    if (!state.selection || state.selection.type !== "instance" || state.selection.id !== inst.id) {
+      setSelection({ type: "instance", id: inst.id });
+    }
+    svg.style.cursor = "grabbing";
+    startWindowDrag({ kind: "instance", inst, start: pt, startClient: { x: evt.clientX, y: evt.clientY },
+      moved: false, orig: { a: { ...inst.a }, b: { ...inst.b } } });
+    return;
+  }
   if (curveHit) {
     hideHint();
     if (evt.shiftKey) {
@@ -2249,6 +2611,37 @@ function onStageMouseDown(evt) {
   // empty canvas: start a new curve
   hideHint();
   beginDrawAt(snapPoint(evt, null));
+}
+
+function onSymbolMouseDown(evt) {
+  const sym = state.symbols.find(sy => sy.id === activeSymbolId);
+  if (!sym) { showHint("Make a symbol first: select curves with the Curve tool and press Make symbol."); return; }
+  const p = snapPoint(evt, null);
+  if (!symbolPending) {
+    symbolPending = p;
+    showHint("Click the end point to place the symbol (snaps to anchors; hold Alt to place freely). Esc to cancel.", true);
+    return;
+  }
+  if (Math.hypot(p.x - symbolPending.x, p.y - symbolPending.y) < 6 / currentScale()) return;
+  const inst = newInstance(sym, symbolPending, p, symbolFlip);
+  symbolPending = null;
+  previewLayer.innerHTML = "";
+  hideHint();
+  if (!state.instances.includes(inst)) return;
+  pushHistory();
+  render();
+}
+
+function symbolPreviewMarkup(evt) {
+  const s = currentScale(), lw = 1 / s, rA = 7 / s;
+  const p = snapPoint(evt, null);
+  const dot = (q, fill, opacity) => snapRingMarkup(q) +
+    `<circle cx="${q.x}" cy="${q.y}" r="${rA}" fill="${fill}" stroke="#1b1d22" stroke-width="${lw}" opacity="${opacity}"></circle>`;
+  const sym = state.symbols.find(sy => sy.id === activeSymbolId);
+  const built = sym && symbolPending && buildInstanceCurves(sym, symbolPending, p, symbolFlip, "preview", "preview");
+  if (!built) return dot(p, "#2ecc71", 0.6);
+  const m = curvesMarkup(built, false);
+  return `<defs>${m.defs}</defs><g opacity="0.55">${m.body}</g>` + dot(symbolPending, "#2ecc71", 1) + dot(p, "#e6453c", 0.6);
 }
 
 function redrawDuringDrag() {
@@ -2303,7 +2696,37 @@ function onWindowMouseMove(evt) {
     redrawDuringDrag();
     return;
   }
+  if (dragCtx.kind === "instance") {
+    const ctx = dragCtx, inst = ctx.inst;
+    if (!ctx.moved) {
+      if (Math.hypot(evt.clientX - ctx.startClient.x, evt.clientY - ctx.startClient.y) < DRAG_THRESHOLD_PX) return;
+      ctx.moved = true;
+      delete inst.links; // a dragged instance leaves the anchors it was attached to
+    }
+    const raw = toSvgPoint(evt);
+    let dx = raw.x - ctx.start.x, dy = raw.y - ctx.start.y;
+    if (state.grid.snap && !evt.altKey) {
+      const res = state.grid.resolution;
+      dx = Math.round(dx / res) * res;
+      dy = Math.round(dy / res) * res;
+    }
+    inst.a = { x: ctx.orig.a.x + dx, y: ctx.orig.a.y + dy };
+    inst.b = { x: ctx.orig.b.x + dx, y: ctx.orig.b.y + dy };
+    resolveLinks();
+    redrawDuringDrag();
+    return;
+  }
   dragCtx.moved = true;
+  if (dragCtx.kind === "pin") {
+    const inst = dragCtx.inst, key = dragCtx.key;
+    const snap = snapPoint(evt, inst.id);
+    inst[key] = { x: snap.x, y: snap.y };
+    setInstanceLink(inst, key, snap.link || null);
+    previewLayer.innerHTML = snapRingMarkup(snap);
+    resolveLinks();
+    redrawDuringDrag();
+    return;
+  }
   if (dragCtx.kind === "anchor") {
     const s = nearestS(dragCtx.curve, toSvgPoint(evt));
     dragCtx.anchor.s = Math.max(0.001, Math.min(0.999, s));
@@ -2389,6 +2812,11 @@ function onStageMouseMove(evt) {
       : `<circle cx="${p.x}" cy="${p.y}" r="${7/s}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${1/s}" opacity="0.6"></circle>`;
     return;
   }
+  if (state.tool === "symbol") {
+    svg.style.cursor = "crosshair";
+    previewLayer.innerHTML = symbolPreviewMarkup(evt);
+    return;
+  }
   if (state.tool === "curve" && !dragCtx) {
     const s = currentScale();
     const rA = 7 / s, lw = 1 / s;
@@ -2404,7 +2832,7 @@ function onStageMouseMove(evt) {
         `<circle cx="${p.x}" cy="${p.y}" r="${rA}" fill="#e6453c" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
       return;
     }
-    if (hitTestHandle(evt) || hitTestAnchor(evt)) {
+    if (hitTestHandle(evt) || hitTestPin(evt) || hitTestAnchor(evt)) {
       svg.style.cursor = "grab";
       previewLayer.innerHTML = "";
       return;
@@ -2434,6 +2862,7 @@ function setTool(tool) {
   state.tool = tool;
   drawPending = null;
   circlePending = null;
+  symbolPending = null;
   state.selection = null;
   hideHint();
   previewLayer.innerHTML = "";
@@ -2442,11 +2871,14 @@ function setTool(tool) {
   document.getElementById("tool-palette").classList.toggle("active", tool === "palette");
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
   document.getElementById("tool-circle").classList.toggle("active", tool === "circle");
+  document.getElementById("tool-symbol").classList.toggle("active", tool === "symbol");
   svg.style.cursor = "default";
   if (tool === "curve") {
     showHint("Click a curve to select it, or click empty canvas (or an anchor) to start a new one.", true);
   } else if (tool === "circle") {
     showHint("Drag from the center to the edge to draw a circle (four quarter-arc curves).", true);
+  } else if (tool === "symbol") {
+    showHint("Click a start point, then an end point, to place the symbol between them.", true);
   }
   render();
 }
@@ -2456,12 +2888,17 @@ document.getElementById("tool-grid").addEventListener("click", () => setTool("gr
 document.getElementById("tool-palette").addEventListener("click", () => setTool("palette"));
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
 document.getElementById("tool-circle").addEventListener("click", () => setTool("circle"));
+document.getElementById("tool-symbol").addEventListener("click", () => setTool("symbol"));
 
 document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
     if (circlePending) cancelCircle();
+    else if (symbolPending) { symbolPending = null; previewLayer.innerHTML = ""; hideHint(); }
     else if (drawPending) { drawPending = null; hideHint(); renderHandles(); }
     else if (state.selection) { state.selection = null; render(); }
+  } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection && state.selection.type === "instance") {
+    if (isTyping(evt)) return;
+    deleteSelectedInstance();
   } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection &&
       (state.selection.type === "curve" || state.selection.type === "curves")) {
     if (document.activeElement && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
@@ -2471,13 +2908,15 @@ document.addEventListener("keydown", evt => {
     state.selection = null;
     render(); pushHistory();
   } else if ((evt.key === "]" || evt.key === "}") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
-      state.selection && (state.selection.type === "curve" || state.selection.type === "curves")) {
+      state.selection && ["curve", "curves", "instance"].includes(state.selection.type)) {
     reorderSelection(evt.shiftKey || evt.key === "}" ? "front" : "forward");
   } else if ((evt.key === "[" || evt.key === "{") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
-      state.selection && (state.selection.type === "curve" || state.selection.type === "curves")) {
+      state.selection && ["curve", "curves", "instance"].includes(state.selection.type)) {
     reorderSelection(evt.shiftKey || evt.key === "{" ? "back" : "backward");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("curve");
+  } else if (evt.key.toLowerCase() === "s" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("symbol");
   } else if (evt.key.toLowerCase() === "o" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("circle");
   } else if (evt.key.toLowerCase() === "p" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
