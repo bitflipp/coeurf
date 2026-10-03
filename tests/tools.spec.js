@@ -1,4 +1,4 @@
-const { test, expect, design } = require("./helpers");
+const { test, expect, curve, design } = require("./helpers");
 
 test.describe("page tool", () => {
   test.beforeEach(async ({ app }) => { await app.tool("page"); });
@@ -20,30 +20,6 @@ test.describe("page tool", () => {
     await app.page.fill("#p-height", "");
     await app.page.locator("#p-height").blur();
     expect((await app.state()).grid.height).toBe(600);
-  });
-
-  test("border: color, width, gradient", async ({ app }) => {
-    await app.page.click("#pg-sub-border");
-    await app.panel.locator('.swatch[data-swatch="#e6453c"]').click();
-    expect((await app.state()).grid.borderColor).toBe("#e6453c");
-    await expect(app.page.locator("#stage rect[fill=none]")).toHaveAttribute("stroke", "#e6453c");
-    await app.page.fill("#p-bwidth", "6");
-    await app.page.locator("#p-bwidth").blur();
-    expect((await app.state()).grid.borderWidth).toBe(6);
-    await app.page.click("#pb-grad");
-    const g = (await app.state()).grid;
-    expect(g.borderColorMode).toBe("gradient");
-    expect(g.borderStops).toHaveLength(2);
-    await expect(app.page.locator("#stage rect[fill=none]")).toHaveAttribute("stroke", "url(#page-border-grad)");
-    await app.page.click("#pb-solid");
-    await expect(app.page.locator("#stage rect[fill=none]")).toHaveAttribute("stroke", "#e6453c");
-  });
-
-  test("sub-tab choice survives switching tools", async ({ app }) => {
-    await app.page.click("#pg-sub-border");
-    await app.tool("grid");
-    await app.tool("page");
-    await expect(app.page.locator("#p-bwidth")).toBeVisible();
   });
 });
 
@@ -156,15 +132,15 @@ test.describe("palette tool", () => {
   test("palette changes show up in the other tools' swatches", async ({ app }) => {
     await app.page.fill("#pal-hex", "#010203");
     await app.page.locator("#pal-hex").blur();
-    await app.tool("page");
-    await app.page.click("#pg-sub-border");
+    await app.tool("curve");
+    await app.draw([100, 100], [300, 100]);
     await expect(app.panel.locator('.swatch[data-swatch="#010203"]')).toHaveCount(1);
   });
 
   test("an empty palette shows a message in other tools", async ({ app }) => {
-    await app.load(design({ palette: [] }));
-    await app.tool("page");
-    await app.page.click("#pg-sub-border");
+    await app.load(design({ curves: [curve({ x: 100, y: 100 }, { x: 300, y: 100 })], palette: [] }));
+    await app.tool("curve");
+    await app.click(200, 100);
     await expect(app.panel).toContainText("palette is empty");
   });
 });
