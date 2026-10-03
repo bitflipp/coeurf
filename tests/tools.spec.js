@@ -33,7 +33,7 @@ test.describe("page tool", () => {
     await app.page.click("#pb-grad");
     const g = (await app.state()).grid;
     expect(g.borderColorMode).toBe("gradient");
-    expect(g.borderColor2).toBeTruthy();
+    expect(g.borderStops).toHaveLength(2);
     await expect(app.page.locator("#stage rect[fill=none]")).toHaveAttribute("stroke", "url(#page-border-grad)");
     await app.page.click("#pb-solid");
     await expect(app.page.locator("#stage rect[fill=none]")).toHaveAttribute("stroke", "#e6453c");

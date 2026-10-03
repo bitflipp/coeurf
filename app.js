@@ -276,7 +276,7 @@ function resolveLinks() {
 /* be linked to an anchor like a curve endpoint (`inst.links.a / b`).       */
 /* ---------------------------------------------------------------------- */
 
-const INSTANCE_STYLE_KEYS = ["width", "width2", "drift", "color", "colorMode", "color2", "gradientAngle", "opacity", "opacityMode", "opacity2", "opacityAngle"];
+const INSTANCE_STYLE_KEYS = ["width", "width2", "drift", "color", "colorMode", "stops", "gradientAngle", "opacity", "opacityMode", "opacityStops", "opacityAngle"];
 
 function symbolPins(sym) {
   const pin = p => {
@@ -320,7 +320,7 @@ function buildInstanceCurves(sym, a, b, flip, idPrefix, instId) {
     const o = { id: `${idPrefix}:${i}`, inst: instId, ix: i,
       p0: map(c.p0), c1: map(c.c1), c2: map(c.c2), p3: map(c.p3),
       anchors: JSON.parse(JSON.stringify(c.anchors)) };
-    for (const key of INSTANCE_STYLE_KEYS) if (c[key] != null) o[key] = c[key];
+    for (const key of INSTANCE_STYLE_KEYS) if (c[key] != null) o[key] = JSON.parse(JSON.stringify(c[key]));
     o.width = c.width * k;
     if (c.width2 != null) o.width2 = c.width2 * k;
     if (c.gradientAngle != null) o.gradientAngle = angle(c.gradientAngle);
@@ -441,9 +441,7 @@ function findNearAnchor(pt, tol, excludeId) {
 }
 
 function anchorLabel(c, a) {
-  if (a.id === "start") return "Start";
-  if (a.id === "end") return "End";
-  return "#" + (c.anchors.filter(x => !isEndAnchor(x)).indexOf(a) + 1);
+  return "#" + (c.anchors.indexOf(a) + 1);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -457,7 +455,7 @@ const DEFAULT_PALETTE = ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", 
 const state = {
   grid: { width: 800, height: 600, resolution: 20, snap: true, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
-  curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, color2?, gradientAngle?, opacity?, opacityMode?, opacity2?, opacityAngle?}
+  curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, stops?, gradientAngle?, opacity?, opacityMode?, opacityStops?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'instance', id}
   tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle" | "symbol"
   symbols: [],       // {id, name, curves: [templateIds], pinA/pinB: {curve, anchor}}
@@ -606,7 +604,8 @@ function restoreFromSnapshot(snap) {
   if (state.grid.snap === undefined) state.grid.snap = true;
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
-  for (const c of state.curves) ensureAnchors(c);
+  for (const c of state.curves) { ensureAnchors(c); migrateStops(c); }
+  migrateStops(state.grid, "border");
   state.symbols = JSON.parse(JSON.stringify(snap.symbols || []));
   state.instances = JSON.parse(JSON.stringify(snap.instances || []));
   resolveLinks();
@@ -622,10 +621,10 @@ function paletteFromUsedColors(snap) {
   const seen = new Set();
   const add = c => { if (c) seen.add(c.toLowerCase()); };
   add(snap.grid.borderColor);
-  if (snap.grid.borderColorMode === "gradient") add(snap.grid.borderColor2);
+  if (snap.grid.borderColorMode === "gradient") { add(snap.grid.borderColor2); for (const t of snap.grid.borderStops || []) add(t.color); }
   for (const c of snap.curves) {
     add(c.color);
-    if (c.colorMode === "gradient") add(c.color2);
+    if (c.colorMode === "gradient") { add(c.color2); for (const t of c.stops || []) add(t.color); }
   }
   return seen.size ? [...seen] : DEFAULT_PALETTE.slice();
 }
@@ -738,11 +737,10 @@ const BORDER_GRADIENT_ID = "page-border-grad";
 // per-item list, so it gets one fixed gradient id instead of one per id.
 function borderFillInfo() {
   const g = state.grid;
-  if (g.borderColorMode === "gradient" && g.borderColor2) {
+  if (g.borderColorMode === "gradient" && g.borderStops) {
     const attrs = gradientAttrs(g.borderGradientAngle || 0, 0, 0, g.width, g.height);
     const defs = `<linearGradient id="${BORDER_GRADIENT_ID}" ${attrs}>` +
-      `<stop offset="0%" stop-color="${g.borderColor}"/>` +
-      `<stop offset="100%" stop-color="${g.borderColor2}"/>` +
+      g.borderStops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
       `</linearGradient>`;
     return { defs, paint: `url(#${BORDER_GRADIENT_ID})` };
   }
@@ -786,19 +784,6 @@ function ensureLayers() {
   svg.appendChild(gridLayer);
   svg.appendChild(handlesLayer);
   svg.appendChild(previewLayer);
-}
-
-// Row of buttons for the multiples of 45 degrees; onPick gets the chosen angle.
-function angleShortcutsHtml() {
-  let h = '<div class="angle-shortcuts">';
-  for (let a = 0; a < 360; a += 45) h += `<button type="button" data-angle="${a}">${a}&deg;</button>`;
-  return h + "</div>";
-}
-function wireAngleShortcuts(angleInput, onPick) {
-  angleInput.closest(".field-row").nextElementSibling.addEventListener("click", e => {
-    const b = e.target.closest("button[data-angle]");
-    if (b) onPick(parseInt(b.dataset.angle, 10));
-  });
 }
 
 // Angle is in screen space (0 = left to right, 90 = top to bottom, matching
@@ -857,6 +842,39 @@ function curveMaskRegion(c) {
 
 function escapeAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
 
+// Gradients are enumerations of stops, each {o: 0..1, color} (or {o, a} for an
+// opacity gradient), kept ordered by offset; there is always at least two.
+function stopsCss(list, opacity) {
+  return list.map(t => {
+    const v = opacity ? `rgba(220,224,232,${t.a})` : t.color;
+    return `${v} ${fmt(t.o * 100)}%`;
+  }).join(", ");
+}
+
+function mixHex(a, b, t) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const [pa, pb] = [p(a), p(b)];
+  return "#" + pa.map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+
+// Converts the old start/end fields (color+color2, opacity+opacity2, and the
+// border's equivalents) into stop lists, for designs saved before stops.
+function migrateStops(o, pre) {
+  const [col, col2, mode, stops] = pre === "border"
+    ? ["borderColor", "borderColor2", "borderColorMode", "borderStops"]
+    : ["color", "color2", "colorMode", "stops"];
+  if (!o[stops] && (o[mode] === "gradient" || o[col2])) {
+    o[stops] = [{ o: 0, color: o[col] }, { o: 1, color: o[col2] || "#5b8cff" }];
+  }
+  delete o[col2];
+  if (pre !== "border") {
+    if (!o.opacityStops && (o.opacityMode === "gradient" || o.opacity2 != null)) {
+      o.opacityStops = [{ o: 0, a: o.opacity != null ? o.opacity : 1 }, { o: 1, a: o.opacity2 != null ? o.opacity2 : 1 }];
+    }
+    delete o.opacity2;
+  }
+}
+
 function curveGradientId(id) {
   return "curve-grad-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
 }
@@ -872,14 +890,12 @@ function curveOpacityMaskId(id) {
 // tight bounds, inside a padded mask region.
 function curveOpacityInfo(c) {
   const a0 = c.opacity != null ? c.opacity : 1;
-  if (c.opacityMode === "gradient") {
-    const a1 = c.opacity2 != null ? c.opacity2 : 1;
+  if (c.opacityMode === "gradient" && c.opacityStops) {
     const mid = curveOpacityMaskId(c.id);
     const gb = curveBox(c);
     const { x, y, w, h } = curveMaskRegion(c);
     const defs = `<linearGradient id="${mid}-g" ${gradientAttrs(c.opacityAngle || 0, gb.x, gb.y, gb.w, gb.h)}>` +
-      `<stop offset="0%" stop-color="#fff" stop-opacity="${a0}"/>` +
-      `<stop offset="100%" stop-color="#fff" stop-opacity="${a1}"/>` +
+      c.opacityStops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="#fff" stop-opacity="${t.a}"/>`).join("") +
       `</linearGradient>` +
       `<mask id="${mid}" maskUnits="userSpaceOnUse" x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}">` +
       `<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="url(#${mid}-g)"/>` +
@@ -1001,12 +1017,11 @@ function curvesMarkup(curves, includeSelection = true) {
     const drift = c.drift != null ? c.drift : 1;
 
     let paint;
-    if (c.colorMode === "gradient" && c.color2) {
+    if (c.colorMode === "gradient" && c.stops) {
       const gid = curveGradientId(c.id);
       const b = curveBox(c);
       defs += `<linearGradient id="${gid}" ${gradientAttrs(c.gradientAngle || 0, b.x, b.y, b.w, b.h)}>` +
-        `<stop offset="0%" stop-color="${c.color}"/>` +
-        `<stop offset="100%" stop-color="${c.color2}"/>` +
+        c.stops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
         `</linearGradient>`;
       paint = `url(#${gid})`;
     } else {
@@ -1513,7 +1528,6 @@ function renderMultiCurvePanel() {
     ${symbolTemplateNote(state.curves.filter(cv => ids.includes(cv.id)))}
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
     <div class="panel-section" style="margin-top:16px">
-      <div class="field-row"><label title="Leave the selected curves out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export-multi" ${selCurves.length && selCurves.every(cv => cv.noExport) ? "checked" : ""}></div>
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol-multi")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
@@ -1524,6 +1538,10 @@ function renderMultiCurvePanel() {
       <div class="action-row">
         <button class="icon-btn danger" id="f-delete-multi" title="Delete all selected curves permanently.">${ICON_TRASH}</button>
       </div>
+    </div>
+    <div class="panel-section">
+      <h3>Misc</h3>
+      <div class="field-row"><label title="Leave the selected curves out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export-multi" ${selCurves.length && selCurves.every(cv => cv.noExport) ? "checked" : ""}></div>
     </div>
   `;
   wireMakeSymbolButton("f-make-symbol-multi", selCurves);
@@ -1623,29 +1641,20 @@ function renderPageBorderFields() {
   function paintGradientFields() {
     colorFields.innerHTML = `
       <div class="gradient-preview" id="pb-gpreview"></div>
-      <div id="pb-c1"></div>
-      <div id="pb-c2"></div>
+      <div id="pb-stops"></div>
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="p-bangle" min="0" max="359" step="1" value="${g.borderGradientAngle}">
         <input type="number" class="num-in" id="p-bangle-num" min="0" max="359" step="1" value="${g.borderGradientAngle}">
         <span class="unit">&deg;</span>
       </div>
-      ${angleShortcutsHtml()}
     `;
     const updatePreview = () => {
       document.getElementById("pb-gpreview").style.background =
-        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${state.grid.borderColor}, ${state.grid.borderColor2})`;
+        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${stopsCss(state.grid.borderStops)})`;
     };
     updatePreview();
-    mountColorField(document.getElementById("pb-c1"), "Start", g.borderColor, v => {
-      state.grid.borderColor = v;
-      updatePreview(); renderCanvas(); pushHistory();
-    });
-    mountColorField(document.getElementById("pb-c2"), "End", g.borderColor2, v => {
-      state.grid.borderColor2 = v;
-      updatePreview(); renderCanvas(); pushHistory();
-    });
+    mountStopTable(document.getElementById("pb-stops"), state.grid.borderStops, false, () => { updatePreview(); renderCanvas(); });
     const angleInput = document.getElementById("p-bangle");
     const angleNum = document.getElementById("p-bangle-num");
     angleInput.addEventListener("input", e => {
@@ -1660,13 +1669,6 @@ function renderPageBorderFields() {
       state.grid.borderGradientAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
-    });
-    wireAngleShortcuts(angleInput, v => {
-      state.grid.borderGradientAngle = v;
-      angleNum.value = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -1688,7 +1690,7 @@ function renderPageBorderFields() {
   document.getElementById("pb-grad").addEventListener("click", () => {
     if (state.grid.borderColorMode === "gradient") return;
     state.grid.borderColorMode = "gradient";
-    state.grid.borderColor2 = state.grid.borderColor2 || "#5b8cff";
+    state.grid.borderStops = state.grid.borderStops || [{ o: 0, color: state.grid.borderColor }, { o: 1, color: "#5b8cff" }];
     state.grid.borderGradientAngle = state.grid.borderGradientAngle != null ? state.grid.borderGradientAngle : 90;
     renderPageBorderFields(); renderCanvas(); pushHistory();
   });
@@ -1753,6 +1755,62 @@ const ICON_FORWARD = `<svg ${ICON_ATTRS}><path d="M6 15l6-6 6 6"/></svg>`;
 const ICON_BACKWARD = `<svg ${ICON_ATTRS}><path d="M6 9l6 6 6-6"/></svg>`;
 const ICON_TO_BACK = `<svg ${ICON_ATTRS}><path d="M6 7l6 6 6-6"/><path d="M6 14l6 6 6-6"/></svg>`;
 
+// Table editor for a gradient's stops: one row per stop (number, position,
+// color or opacity, delete). `list` is edited in place and kept sorted;
+// onChange repaints the preview and canvas, history is pushed on commit.
+function mountStopTable(host, list, opacity, onChange) {
+  const paint = () => {
+    list.sort((a, b) => a.o - b.o);
+    host.innerHTML = (opacity ? "" : `<datalist id="stop-palette">${state.palette.map(p => `<option value="${p}"></option>`).join("")}</datalist>`) +
+      `<div class="tbl"><div class="tbl-row tbl-head"><span>#</span><span>Position (%)</span><span>${opacity ? "Opacity (%)" : "Color"}</span><span></span></div>` +
+      list.map((t, i) => `<div class="tbl-row anchor-row" data-i="${i}">
+        <span>${i + 1}</span>
+        <span><input type="number" class="s-o" min="0" max="100" step="1" value="${Math.round(t.o * 1000) / 10}" title="Position along the gradient"></span>
+        <span>${opacity
+          ? `<input type="number" class="s-v" min="0" max="100" step="1" value="${Math.round(t.a * 100)}" title="Opacity">`
+          : `<input type="color" class="s-v" list="stop-palette" value="${t.color}" title="Color">`}</span>
+        <span><button class="icon-btn s-del" title="Remove this stop" ${list.length <= 2 ? "disabled" : ""}>${ICON_TRASH}</button></span>
+      </div>`).join("") + `</div>` +
+      `<div class="action-row"><button class="icon-btn s-add" title="Add a stop in the widest gap">+ Add stop</button></div>`;
+    for (const row of host.querySelectorAll(".anchor-row")) {
+      const t = list[parseInt(row.dataset.i, 10)];
+      const v = row.querySelector(".s-v");
+      row.querySelector(".s-o").addEventListener("change", e => {
+        const n = parseFloat(e.target.value);
+        if (Number.isFinite(n)) t.o = Math.max(0, Math.min(100, n)) / 100;
+        paint(); onChange(); pushHistory();
+      });
+      if (opacity) {
+        v.addEventListener("input", e => {
+          const n = parseInt(e.target.value, 10);
+          if (Number.isFinite(n)) { t.a = Math.max(0, Math.min(100, n)) / 100; onChange(); }
+        });
+        v.addEventListener("change", e => {
+          t.a = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)) / 100;
+          e.target.value = Math.round(t.a * 100);
+          onChange(); pushHistory();
+        });
+      } else {
+        v.addEventListener("input", e => { t.color = e.target.value; onChange(); });
+        v.addEventListener("change", () => pushHistory());
+      }
+      row.querySelector(".s-del").addEventListener("click", () => {
+        if (list.length <= 2) return;
+        list.splice(list.indexOf(t), 1);
+        paint(); onChange(); pushHistory();
+      });
+    }
+    host.querySelector(".s-add").addEventListener("click", () => {
+      let i = 0, gap = -1;
+      for (let k = 0; k < list.length - 1; k++) if (list[k + 1].o - list[k].o > gap) { gap = list[k + 1].o - list[k].o; i = k; }
+      const [p, q] = [list[i], list[i + 1]], o = (p.o + q.o) / 2;
+      list.push(opacity ? { o, a: Math.round((p.a + q.a) * 50) / 100 } : { o, color: mixHex(p.color, q.color, 0.5) });
+      paint(); onChange(); pushHistory();
+    });
+  };
+  paint();
+}
+
 // Anchor list, presets and link summary of the curve panel. Edits go through
 // ensureAnchors/resolveLinks so linked curves follow immediately.
 function mountAnchorFields(c) {
@@ -1778,15 +1836,16 @@ function mountAnchorFields(c) {
   });
 
   const list = document.getElementById("a-list");
-  list.innerHTML = c.anchors.map(a => {
-    const end = isEndAnchor(a);
-    return `<div class="field-row anchor-row" data-anchor="${a.id}">
-      <label>${anchorLabel(c, a)}</label>
-      <input type="number" class="num-in a-s" min="0" max="100" step="1" value="${Math.round(a.s * 1000) / 10}" ${end ? "disabled" : ""}><span class="unit">%</span>
-      <input type="checkbox" class="a-tan" title="Snap tangent: curves attached here leave along this anchor's tangent" ${a.tangent ? "checked" : ""}>
-      ${end ? `<span class="anchor-spacer"></span>` : `<button class="icon-btn a-del" title="Remove this anchor">${ICON_TRASH}</button>`}
-    </div>`;
-  }).join("");
+  list.innerHTML = `<div class="tbl tbl-anchors"><div class="tbl-row tbl-head"><span>#</span><span>Position (%)</span><span title="Curves attached to an anchor leave along its tangent">Tangent</span><span></span></div>` +
+    c.anchors.map(a => {
+      const end = isEndAnchor(a);
+      return `<div class="tbl-row anchor-row" data-anchor="${a.id}">
+        <span>${c.anchors.indexOf(a) + 1}</span>
+        <span><input type="number" class="a-s" min="0" max="100" step="1" value="${Math.round(a.s * 1000) / 10}" ${end ? "disabled" : ""}></span>
+        <span><input type="checkbox" class="a-tan" title="Snap tangent: curves attached here leave along this anchor's tangent" ${a.tangent ? "checked" : ""}></span>
+        <span>${end ? "" : `<button class="icon-btn a-del" title="Remove this anchor">${ICON_TRASH}</button>`}</span>
+      </div>`;
+    }).join("") + `</div>`;
   for (const row of list.querySelectorAll(".anchor-row")) {
     const a = c.anchors.find(x => x.id === row.dataset.anchor);
     row.querySelector(".a-tan").addEventListener("change", e => { a.tangent = e.target.checked; commit(); });
@@ -1870,7 +1929,6 @@ function renderCurvePanel() {
         <button class="icon-btn" id="f-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
         <button class="icon-btn" id="f-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
       </div>
-      <div class="field-row"><label title="Leave this curve out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export" ${c.noExport ? "checked" : ""}></div>
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-mirror" title="Mirror copy: add a new curve reflected across the straight line joining this curve's two endpoints, forming a symmetric lens shape.">${ICON_MIRROR_SELF}</button>
@@ -1879,6 +1937,10 @@ function renderCurvePanel() {
         <button class="icon-btn" id="f-flip" title="Flip: swap this curve's start and end points.">${ICON_FLIP_DIR}</button>
         <button class="icon-btn danger" id="f-delete" title="Delete this curve permanently.">${ICON_TRASH}</button>
       </div>
+    </div>
+    <div class="panel-section">
+      <h3>Misc</h3>
+      <div class="field-row"><label title="Leave this curve out of the exported SVG (handy for symbol templates)">Exclude from SVG</label><input type="checkbox" id="f-no-export" ${c.noExport ? "checked" : ""}></div>
     </div>
   `;
   mountAnchorFields(c);
@@ -1906,29 +1968,20 @@ function renderCurvePanel() {
   function paintGradientFields() {
     colorFields.innerHTML = `
       <div class="gradient-preview" id="f-gpreview"></div>
-      <div id="f-c1"></div>
-      <div id="f-c2"></div>
+      <div id="f-stops"></div>
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-gangle" min="0" max="359" step="1" value="${c.gradientAngle}">
         <input type="number" class="num-in" id="f-gangle-num" min="0" max="359" step="1" value="${c.gradientAngle}">
         <span class="unit">&deg;</span>
       </div>
-      ${angleShortcutsHtml()}
     `;
     const updatePreview = () => {
       document.getElementById("f-gpreview").style.background =
-        `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${c.color}, ${c.color2})`;
+        `linear-gradient(${cssGradientAngle(c.gradientAngle)}deg, ${stopsCss(c.stops)})`;
     };
     updatePreview();
-    mountColorField(document.getElementById("f-c1"), "Start", c.color, v => {
-      c.color = v;
-      updatePreview(); renderCanvas(); pushHistory();
-    });
-    mountColorField(document.getElementById("f-c2"), "End", c.color2, v => {
-      c.color2 = v;
-      updatePreview(); renderCanvas(); pushHistory();
-    });
+    mountStopTable(document.getElementById("f-stops"), c.stops, false, () => { updatePreview(); renderCanvas(); });
     const angleInput = document.getElementById("f-gangle");
     const angleNum = document.getElementById("f-gangle-num");
     angleInput.addEventListener("input", e => {
@@ -1943,13 +1996,6 @@ function renderCurvePanel() {
       c.gradientAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
-    });
-    wireAngleShortcuts(angleInput, v => {
-      c.gradientAngle = v;
-      angleNum.value = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -1971,7 +2017,7 @@ function renderCurvePanel() {
   document.getElementById("c-grad").addEventListener("click", () => {
     if (c.colorMode === "gradient") return;
     c.colorMode = "gradient";
-    c.color2 = c.color2 || "#5b8cff";
+    c.stops = c.stops || [{ o: 0, color: c.color }, { o: 1, color: "#5b8cff" }];
     c.gradientAngle = c.gradientAngle != null ? c.gradientAngle : 90;
     renderCurvePanel(); renderCanvas(); pushHistory();
   });
@@ -2018,25 +2064,20 @@ function renderCurvePanel() {
     const angle = c.opacityAngle || 0;
     opacityFields.innerHTML = `
       <div class="gradient-preview opacity-preview"><div id="f-oppreview"></div></div>
-      ${opacityRow("Start", "f-op", "opacity", 1)}
-      ${opacityRow("End", "f-op2", "opacity2", 1)}
+      <div id="f-ostops"></div>
       <div class="field-row">
         <label>Angle</label>
         <input type="range" id="f-opangle" min="0" max="359" step="1" value="${angle}">
         <input type="number" class="num-in" id="f-opangle-num" min="0" max="359" step="1" value="${angle}">
         <span class="unit">&deg;</span>
       </div>
-      ${angleShortcutsHtml()}
     `;
     const updatePreview = () => {
-      const a0 = c.opacity != null ? c.opacity : 1;
-      const a1 = c.opacity2 != null ? c.opacity2 : 1;
       document.getElementById("f-oppreview").style.background =
-        `linear-gradient(${cssGradientAngle(c.opacityAngle || 0)}deg, rgba(220,224,232,${a0}), rgba(220,224,232,${a1}))`;
+        `linear-gradient(${cssGradientAngle(c.opacityAngle || 0)}deg, ${stopsCss(c.opacityStops, true)})`;
     };
     updatePreview();
-    wireOpacity("f-op", "opacity", updatePreview);
-    wireOpacity("f-op2", "opacity2", updatePreview);
+    mountStopTable(document.getElementById("f-ostops"), c.opacityStops, true, () => { updatePreview(); renderCanvas(); });
     const angleInput = document.getElementById("f-opangle");
     const angleNum = document.getElementById("f-opangle-num");
     angleInput.addEventListener("input", e => {
@@ -2051,13 +2092,6 @@ function renderCurvePanel() {
       c.opacityAngle = v;
       angleInput.value = v;
       updatePreview(); renderCanvas();
-    });
-    wireAngleShortcuts(angleInput, v => {
-      c.opacityAngle = v;
-      angleNum.value = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-      pushHistory();
     });
     angleNum.addEventListener("change", e => {
       const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
@@ -2078,7 +2112,7 @@ function renderCurvePanel() {
   document.getElementById("c-op-grad").addEventListener("click", () => {
     if (isOpGrad) return;
     c.opacityMode = "gradient";
-    c.opacity2 = c.opacity2 != null ? c.opacity2 : 0;
+    c.opacityStops = c.opacityStops || [{ o: 0, a: c.opacity != null ? c.opacity : 1 }, { o: 1, a: 0 }];
     c.opacityAngle = c.opacityAngle != null ? c.opacityAngle : 90;
     renderCurvePanel(); renderCanvas(); pushHistory();
   });
@@ -2331,6 +2365,8 @@ function defaultCurveBetween(p0, p3, res) {
 
 // Mirrors a curve across the line through its own start and end point,
 // producing a new curve so symmetric shapes can be built from one half.
+function clone(v) { return v == null ? v : JSON.parse(JSON.stringify(v)); }
+
 function mirrorCurve(c) {
   const p0 = c.p0, p3 = c.p3;
   let dx = p3.x - p0.x, dy = p3.y - p0.y;
@@ -2345,8 +2381,8 @@ function mirrorCurve(c) {
   return { id, p0: { ...p0 }, c1: reflect(c.c1), c2: reflect(c.c2), p3: { ...p3 },
     anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
-    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
+    colorMode: c.colorMode, stops: clone(c.stops), gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacityStops: clone(c.opacityStops), opacityAngle: c.opacityAngle };
 }
 
 // Mirrors a curve across the page's horizontal center axis (flips top/bottom).
@@ -2357,8 +2393,8 @@ function mirrorCurveHorizontalAxis(c) {
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
-    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
+    colorMode: c.colorMode, stops: clone(c.stops), gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacityStops: clone(c.opacityStops), opacityAngle: c.opacityAngle };
 }
 
 // Mirrors a curve across the page's vertical center axis (flips left/right).
@@ -2369,8 +2405,8 @@ function mirrorCurveVerticalAxis(c) {
   return { id, p0: reflect(c.p0), c1: reflect(c.c1), c2: reflect(c.c2), p3: reflect(c.p3),
     anchors: JSON.parse(JSON.stringify(c.anchors)),
     width: c.width, width2: c.width2, drift: c.drift, color: c.color,
-    colorMode: c.colorMode, color2: c.color2, gradientAngle: c.gradientAngle,
-    opacity: c.opacity, opacityMode: c.opacityMode, opacity2: c.opacity2, opacityAngle: c.opacityAngle };
+    colorMode: c.colorMode, stops: clone(c.stops), gradientAngle: c.gradientAngle,
+    opacity: c.opacity, opacityMode: c.opacityMode, opacityStops: clone(c.opacityStops), opacityAngle: c.opacityAngle };
 }
 
 // Snap target for a point being placed: an anchor of another curve (which

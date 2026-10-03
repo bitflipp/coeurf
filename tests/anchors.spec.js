@@ -157,7 +157,7 @@ test.describe("links", () => {
   test("the panel lists links and Detach removes one", async ({ app }) => {
     await app.load(design({ curves: [HOST, CHILD] }));
     await app.click(300, 150);
-    await expect(app.panel).toContainText("End attached to #1 of h");
+    await expect(app.panel).toContainText("End attached to #2 of h");
     await app.page.click(".detach");
     expect(byId(await app.curves(), "k").links).toBeUndefined();
   });

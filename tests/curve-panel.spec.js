@@ -21,17 +21,29 @@ test.describe("curve panel", () => {
     await expect(app.panel.locator(".swatch.active")).toHaveAttribute("data-swatch", "#2a2d34");
   });
 
-  test("gradient mode exposes start/end colors and angle", async ({ app }) => {
+  test("gradient mode exposes a stop table and angle", async ({ app }) => {
     await app.page.click("#c-grad");
     const c = await cur(app);
     expect(c.colorMode).toBe("gradient");
-    expect(c.color2).toBeTruthy();
+    expect(c.stops).toHaveLength(2);
     await expect(app.page.locator("#stage linearGradient")).toHaveCount(1);
     await app.page.fill("#f-gangle-num", "45");
     await app.page.locator("#f-gangle-num").blur();
     expect((await cur(app)).gradientAngle).toBe(45);
-    await app.panel.locator("#f-c2 .swatch").nth(2).click();
-    expect((await cur(app)).color2).toBe("#e6453c");
+    await app.panel.locator("#f-stops .s-v").nth(1).evaluate(el => {
+      el.value = "#e6453c"; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect((await cur(app)).stops[1].color).toBe("#e6453c");
+    await expect(app.page.locator(".angle-shortcuts")).toHaveCount(0);
+    await app.page.click("#f-stops .s-add");
+    expect((await cur(app)).stops.map(s => s.o)).toEqual([0, 0.5, 1]);
+    await expect(app.page.locator("#stage linearGradient stop")).toHaveCount(3);
+    await app.page.fill("#f-stops .s-o >> nth=1", "25");
+    await app.page.locator("#f-stops .s-o >> nth=1").blur();
+    expect((await cur(app)).stops[1].o).toBe(0.25);
+    await app.page.click("#f-stops .s-del >> nth=1");
+    expect((await cur(app)).stops).toHaveLength(2);
+    await expect(app.page.locator("#f-stops .s-del").first()).toBeDisabled();
     await app.page.click("#c-solid");
     expect((await cur(app)).colorMode).toBe("solid");
     await expect(app.page.locator("#stage linearGradient")).toHaveCount(0);
@@ -76,12 +88,12 @@ test.describe("curve panel", () => {
     await expect(app.page.locator("#f-op")).toHaveValue("40");
   });
 
-  test("gradient opacity has start, end and angle", async ({ app }) => {
+  test("gradient opacity is a stop table with an angle", async ({ app }) => {
     await app.page.click("#c-op-grad");
     expect((await cur(app)).opacityMode).toBe("gradient");
-    await app.page.fill("#f-op2-num", "10");
-    await app.page.locator("#f-op2-num").blur();
-    expect((await cur(app)).opacity2).toBe(0.1);
+    await app.page.fill("#f-ostops .s-v >> nth=1", "10");
+    await app.page.locator("#f-ostops .s-v >> nth=1").blur();
+    expect((await cur(app)).opacityStops[1].a).toBe(0.1);
     await expect(app.page.locator("#stage mask")).toHaveCount(1);
     await app.page.click("#c-op-flat");
     await expect(app.page.locator("#stage mask")).toHaveCount(0);
