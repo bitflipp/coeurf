@@ -448,12 +448,12 @@ function anchorLabel(c, a) {
 /* Application state                                                       */
 /* ---------------------------------------------------------------------- */
 
-// Colors are copied into curves/border as literal hex values when picked, so
+// Colors are copied into curves as literal hex values when picked, so
 // editing or deleting a palette entry never touches anything already using it.
 const DEFAULT_PALETTE = ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", "#5b8cff", "#c14bff"];
 
 const state = {
-  grid: { width: 800, height: 600, resolution: 20, snap: true, borderColor: "#33363d", borderWidth: 2, visible: true, specialLines: { center: false, thirds: false, golden: false } },
+  grid: { width: 800, height: 600, resolution: 20, snap: true, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
   curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, stops?, gradientAngle?, opacity?, opacityMode?, opacityStops?, opacityAngle?}
   selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'instance', id}
@@ -477,7 +477,6 @@ let symbolFlip = false;    // whether the Symbol tool places mirrored instances
 
 // Which sub-panel the Page tool shows - purely a UI concern (like `zoom`),
 // so it's kept out of `state` and never saved/undone.
-let pageSubtool = "dimensions"; // "dimensions" | "border"
 
 /* ---------------------------------------------------------------------- */
 /* View: zoom & pan                                                        */
@@ -605,7 +604,7 @@ function restoreFromSnapshot(snap) {
   if (!state.grid.specialLines) state.grid.specialLines = { center: false, thirds: false, golden: false };
   state.curves = JSON.parse(JSON.stringify(snap.curves));
   for (const c of state.curves) { ensureAnchors(c); migrateStops(c); }
-  migrateStops(state.grid, "border");
+  for (const k of Object.keys(state.grid)) if (k.startsWith("border")) delete state.grid[k];
   state.symbols = JSON.parse(JSON.stringify(snap.symbols || []));
   state.instances = JSON.parse(JSON.stringify(snap.instances || []));
   resolveLinks();
@@ -620,8 +619,6 @@ function restoreFromSnapshot(snap) {
 function paletteFromUsedColors(snap) {
   const seen = new Set();
   const add = c => { if (c) seen.add(c.toLowerCase()); };
-  add(snap.grid.borderColor);
-  if (snap.grid.borderColorMode === "gradient") { add(snap.grid.borderColor2); for (const t of snap.grid.borderStops || []) add(t.color); }
   for (const c of snap.curves) {
     add(c.color);
     if (c.colorMode === "gradient") { add(c.color2); for (const t of c.stops || []) add(t.color); }
@@ -724,33 +721,6 @@ function importDesignFromFile(file) {
   };
   reader.onerror = () => showHint("Could not read file.");
   reader.readAsText(file);
-}
-
-/* ---------------------------------------------------------------------- */
-/* Border rendering                                                        */
-/* ---------------------------------------------------------------------- */
-
-const BORDER_GRADIENT_ID = "page-border-grad";
-
-// Mirrors curvesMarkup's per-curve gradient handling (see gradientAttrs)
-// for the page border, which is a single shared stroke rather than a
-// per-item list, so it gets one fixed gradient id instead of one per id.
-function borderFillInfo() {
-  const g = state.grid;
-  if (g.borderColorMode === "gradient" && g.borderStops) {
-    const attrs = gradientAttrs(g.borderGradientAngle || 0, 0, 0, g.width, g.height);
-    const defs = `<linearGradient id="${BORDER_GRADIENT_ID}" ${attrs}>` +
-      g.borderStops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
-      `</linearGradient>`;
-    return { defs, paint: `url(#${BORDER_GRADIENT_ID})` };
-  }
-  return { defs: "", paint: g.borderColor };
-}
-
-function borderMarkup() {
-  const { width: W, height: H, borderWidth } = state.grid;
-  const { paint } = borderFillInfo();
-  return `<rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="${paint}" stroke-width="${borderWidth}"></rect>`;
 }
 
 function fmt(n) { return Math.round(n * 100) / 100; }
@@ -857,22 +827,16 @@ function mixHex(a, b, t) {
   return "#" + pa.map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, "0")).join("");
 }
 
-// Converts the old start/end fields (color+color2, opacity+opacity2, and the
-// border's equivalents) into stop lists, for designs saved before stops.
-function migrateStops(o, pre) {
-  const [col, col2, mode, stops] = pre === "border"
-    ? ["borderColor", "borderColor2", "borderColorMode", "borderStops"]
-    : ["color", "color2", "colorMode", "stops"];
-  if (!o[stops] && (o[mode] === "gradient" || o[col2])) {
-    o[stops] = [{ o: 0, color: o[col] }, { o: 1, color: o[col2] || "#5b8cff" }];
+// Converts the old start/end fields (color+color2, opacity+opacity2) into stop lists, for designs saved before stops.
+function migrateStops(o) {
+  if (!o.stops && (o.colorMode === "gradient" || o.color2)) {
+    o.stops = [{ o: 0, color: o.color }, { o: 1, color: o.color2 || "#5b8cff" }];
   }
-  delete o[col2];
-  if (pre !== "border") {
-    if (!o.opacityStops && (o.opacityMode === "gradient" || o.opacity2 != null)) {
-      o.opacityStops = [{ o: 0, a: o.opacity != null ? o.opacity : 1 }, { o: 1, a: o.opacity2 != null ? o.opacity2 : 1 }];
-    }
-    delete o.opacity2;
+  delete o.color2;
+  if (!o.opacityStops && (o.opacityMode === "gradient" || o.opacity2 != null)) {
+    o.opacityStops = [{ o: 0, a: o.opacity != null ? o.opacity : 1 }, { o: 1, a: o.opacity2 != null ? o.opacity2 : 1 }];
   }
+  delete o.opacity2;
 }
 
 function curveGradientId(id) {
@@ -1179,8 +1143,8 @@ function renderCanvas() {
   renderGrid();
 
   const curveA = curvesMarkup(state.curves);
-  defsLayer.innerHTML = curveA.defs + borderFillInfo().defs;
-  curvesLayer.innerHTML = curveA.body + borderMarkup();
+  defsLayer.innerHTML = curveA.defs;
+  curvesLayer.innerHTML = curveA.body;
 
   renderHandles();
 }
@@ -1266,7 +1230,7 @@ function renderPalettePanel() {
         <button class="icon-btn danger" id="pal-delete" title="Delete this color from the palette.">${ICON_TRASH}</button>
       </div>
     </div>` : ""}
-    <div class="panel-empty" style="margin-top:16px">Other tools can only pick from these colors. Changing or deleting one here doesn't affect anything already using it. Drag to reorder.</div>
+    <div class="panel-empty">Other tools can only pick from these colors. Changing or deleting one here doesn't affect anything already using it. Drag to reorder.</div>
   `;
 
   document.getElementById("pal-add").addEventListener("click", () => {
@@ -1527,7 +1491,7 @@ function renderMultiCurvePanel() {
   panel.innerHTML = `
     ${symbolTemplateNote(state.curves.filter(cv => ids.includes(cv.id)))}
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
-    <div class="panel-section" style="margin-top:16px">
+    <div class="panel-section">
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol-multi")}</div>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
@@ -1564,30 +1528,12 @@ function renderMultiCurvePanel() {
 }
 
 function renderPagePanel() {
-  const isBorder = pageSubtool === "border";
-  panel.innerHTML = `
-    <div class="seg">
-      <button id="pg-sub-dim" class="${!isBorder ? "active" : ""}">Dimensions</button>
-      <button id="pg-sub-border" class="${isBorder ? "active" : ""}">Border</button>
-    </div>
-    <div id="page-subtool-body"></div>
-  `;
-  document.getElementById("pg-sub-dim").addEventListener("click", () => {
-    if (pageSubtool === "dimensions") return;
-    pageSubtool = "dimensions";
-    renderPagePanel();
-  });
-  document.getElementById("pg-sub-border").addEventListener("click", () => {
-    if (pageSubtool === "border") return;
-    pageSubtool = "border";
-    renderPagePanel();
-  });
-  if (isBorder) renderPageBorderFields(); else renderPageDimensionsFields();
+  renderPageDimensionsFields();
 }
 
 function renderPageDimensionsFields() {
   const g = state.grid;
-  document.getElementById("page-subtool-body").innerHTML = `
+  panel.innerHTML = `
     <div class="panel-section">
       <div class="field-row"><label>Width</label><input type="number" class="num-in" min="20" step="1" id="p-width" value="${g.width}"><span class="unit">px</span></div>
       <div class="field-row"><label>Height</label><input type="number" class="num-in" min="20" step="1" id="p-height" value="${g.height}"><span class="unit">px</span></div>
@@ -1604,102 +1550,6 @@ function renderPageDimensionsFields() {
   for (const id of ["p-width", "p-height"]) {
     document.getElementById(id).addEventListener("change", applyDimFields);
   }
-}
-
-// Fill section mirrors renderCurvePanel's Solid/Gradient toggle (see
-// paintSolidFields/paintGradientFields there) - kept as its own copy rather
-// than shared, since the target here is state.grid.border* fields rather
-// than a curve object.
-function renderPageBorderFields() {
-  const g = state.grid;
-  const isGrad = g.borderColorMode === "gradient";
-  document.getElementById("page-subtool-body").innerHTML = `
-    <div class="panel-section">
-      <h3>Fill</h3>
-      <div class="seg">
-        <button id="pb-solid" class="${!isGrad ? "active" : ""}">Solid</button>
-        <button id="pb-grad" class="${isGrad ? "active" : ""}">Gradient</button>
-      </div>
-      <div id="border-color-fields"></div>
-    </div>
-    <div class="panel-section">
-      <h3>Width</h3>
-      <div class="field-row"><label>Border width</label><input type="number" class="num-in" min="0" step="0.5" id="p-bwidth" value="${g.borderWidth}"><span class="unit">px</span></div>
-    </div>
-  `;
-
-  const colorFields = document.getElementById("border-color-fields");
-
-  function paintSolidFields() {
-    colorFields.innerHTML = "";
-    mountColorField(colorFields, "Color", g.borderColor, v => {
-      state.grid.borderColor = v;
-      renderCanvas(); pushHistory();
-    });
-  }
-
-  function paintGradientFields() {
-    colorFields.innerHTML = `
-      <div class="gradient-preview" id="pb-gpreview"></div>
-      <div id="pb-stops"></div>
-      <div class="field-row">
-        <label>Angle</label>
-        <input type="range" id="p-bangle" min="0" max="359" step="1" value="${g.borderGradientAngle}">
-        <input type="number" class="num-in" id="p-bangle-num" min="0" max="359" step="1" value="${g.borderGradientAngle}">
-        <span class="unit">&deg;</span>
-      </div>
-    `;
-    const updatePreview = () => {
-      document.getElementById("pb-gpreview").style.background =
-        `linear-gradient(${cssGradientAngle(state.grid.borderGradientAngle)}deg, ${stopsCss(state.grid.borderStops)})`;
-    };
-    updatePreview();
-    mountStopTable(document.getElementById("pb-stops"), state.grid.borderStops, false, () => { updatePreview(); renderCanvas(); });
-    const angleInput = document.getElementById("p-bangle");
-    const angleNum = document.getElementById("p-bangle-num");
-    angleInput.addEventListener("input", e => {
-      state.grid.borderGradientAngle = parseInt(e.target.value, 10);
-      angleNum.value = state.grid.borderGradientAngle;
-      updatePreview(); renderCanvas();
-    });
-    angleInput.addEventListener("change", () => pushHistory());
-    angleNum.addEventListener("input", e => {
-      const v = parseInt(e.target.value, 10);
-      if (!Number.isFinite(v)) return;
-      state.grid.borderGradientAngle = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-    });
-    angleNum.addEventListener("change", e => {
-      const v = Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0));
-      state.grid.borderGradientAngle = v;
-      e.target.value = v;
-      angleInput.value = v;
-      updatePreview(); renderCanvas();
-      pushHistory();
-    });
-  }
-
-  if (isGrad) paintGradientFields(); else paintSolidFields();
-
-  document.getElementById("pb-solid").addEventListener("click", () => {
-    if (state.grid.borderColorMode !== "gradient") return;
-    state.grid.borderColorMode = "solid";
-    renderPageBorderFields(); renderCanvas(); pushHistory();
-  });
-  document.getElementById("pb-grad").addEventListener("click", () => {
-    if (state.grid.borderColorMode === "gradient") return;
-    state.grid.borderColorMode = "gradient";
-    state.grid.borderStops = state.grid.borderStops || [{ o: 0, color: state.grid.borderColor }, { o: 1, color: "#5b8cff" }];
-    state.grid.borderGradientAngle = state.grid.borderGradientAngle != null ? state.grid.borderGradientAngle : 90;
-    renderPageBorderFields(); renderCanvas(); pushHistory();
-  });
-
-  document.getElementById("p-bwidth").addEventListener("change", () => {
-    state.grid.borderWidth = parseFloat(document.getElementById("p-bwidth").value) || 0;
-    renderCanvas();
-    pushHistory();
-  });
 }
 
 const SPECIAL_LINE_LABELS = { center: "Center", thirds: "Thirds", golden: "Golden ratio" };
@@ -2693,7 +2543,7 @@ function symbolPreviewMarkup(evt) {
 
 function redrawDuringDrag() {
   renderHandles();
-  curvesLayer.innerHTML = curvesMarkup(state.curves).body + borderMarkup();
+  curvesLayer.innerHTML = curvesMarkup(state.curves).body;
 }
 
 function snapRingMarkup(snap) {
@@ -3035,10 +2885,10 @@ document.getElementById("import-input").addEventListener("change", evt => {
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
   const curveA = curvesMarkup(state.curves.filter(c => !c.noExport), false);
-  const curves = curveA.body + borderMarkup();
+  const curves = curveA.body;
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +
-    `<defs>${curveA.defs}${borderFillInfo().defs}</defs>\n` +
+    `<defs>${curveA.defs}</defs>\n` +
     `<g id="curves">${curves}</g>\n` +
     `</svg>\n`;
 }

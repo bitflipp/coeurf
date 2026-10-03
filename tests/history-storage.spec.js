@@ -103,7 +103,6 @@ test.describe("autosave", () => {
     await app.load(d);
     const pal = (await app.state()).palette;
     expect(pal).toContain("#123456");
-    expect(pal).toContain("#33363d");
   });
 
   test("older designs without visible/specialLines get defaults", async ({ app }) => {

@@ -29,7 +29,7 @@ function curve(p0, p3, extra = {}) {
 function design({ curves = [], grid = {}, palette } = {}) {
   return {
     grid: {
-      width: 800, height: 600, resolution: 20, borderColor: "#33363d", borderWidth: 2,
+      width: 800, height: 600, resolution: 20,
       visible: true, specialLines: { center: false, thirds: false, golden: false }, ...grid,
     },
     palette: palette || ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", "#5b8cff", "#c14bff"],
