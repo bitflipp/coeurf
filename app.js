@@ -1742,8 +1742,8 @@ function renderCurvePanel() {
       <h3>Width</h3>
       <div class="field-row">
         <label>${isTapered ? "Start width" : "Width"}</label>
-        <input type="range" id="f-width" min="0.5" max="30" step="0.5" value="${c.width}">
-        <input type="number" class="num-in" id="f-width-num" min="0.5" max="30" step="0.5" value="${c.width}">
+        <input type="range" id="f-width" min="0.5" max="300" step="0.5" value="${c.width}">
+        <input type="number" class="num-in" id="f-width-num" min="0.5" max="300" step="0.5" value="${c.width}">
         <span class="unit">px</span>
       </div>
       <div class="field-row"><label>Taper</label><input type="checkbox" id="f-taper" ${isTapered ? "checked" : ""}></div>
@@ -1977,7 +1977,7 @@ function renderCurvePanel() {
     renderCanvas();
   });
   widthNum.addEventListener("change", e => {
-    const v = Math.max(0.5, Math.min(30, parseFloat(e.target.value) || c.width));
+    const v = Math.max(0.5, Math.min(300, parseFloat(e.target.value) || c.width));
     c.width = v;
     e.target.value = v;
     widthInput.value = v;
@@ -1992,8 +1992,8 @@ function renderCurvePanel() {
     taperFields.innerHTML = `
       <div class="field-row">
         <label>End width</label>
-        <input type="range" id="f-width2" min="0.5" max="30" step="0.5" value="${c.width2}">
-        <input type="number" class="num-in" id="f-width2-num" min="0.5" max="30" step="0.5" value="${c.width2}">
+        <input type="range" id="f-width2" min="0.5" max="300" step="0.5" value="${c.width2}">
+        <input type="number" class="num-in" id="f-width2-num" min="0.5" max="300" step="0.5" value="${c.width2}">
         <span class="unit">px</span>
       </div>
       <div class="field-row">
@@ -2019,7 +2019,7 @@ function renderCurvePanel() {
       renderCanvas();
     });
     width2Num.addEventListener("change", e => {
-      const v = Math.max(0.5, Math.min(30, parseFloat(e.target.value) || c.width2));
+      const v = Math.max(0.5, Math.min(300, parseFloat(e.target.value) || c.width2));
       c.width2 = v;
       e.target.value = v;
       width2Input.value = v;

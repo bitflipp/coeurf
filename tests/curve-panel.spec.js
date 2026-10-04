@@ -62,9 +62,9 @@ test.describe("curve panel", () => {
     expect((await cur(app)).width).toBe(12);
     await expect(app.page.locator("#f-width")).toHaveValue("12");
     await expect(app.curvePaths().first()).toHaveAttribute("stroke-width", "12");
-    await app.page.fill("#f-width-num", "500");
+    await app.page.fill("#f-width-num", "1000");
     await app.page.locator("#f-width-num").blur();
-    expect((await cur(app)).width).toBe(30);
+    expect((await cur(app)).width).toBe(300);
   });
 
   test("taper adds an end width and drift, and can be removed", async ({ app }) => {
