@@ -4,7 +4,7 @@ export COEURF_DB_DSN := env("COEURF_DB_DSN", "coeurf:coeurf@/coeurf?parseTime=tr
 default:
     @just --list
 
-# Run the server with storage (set COEURF_ADDR to change the :8080 default)
+# Run the server with storage (set COEURF_ADDR to change the :2547 default)
 run:
     go run .
 

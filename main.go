@@ -33,7 +33,7 @@ func run() error {
 
 	addr := os.Getenv("COEURF_ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = ":2547"
 	}
 
 	var st *store.Store

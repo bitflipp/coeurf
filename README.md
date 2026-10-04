@@ -38,7 +38,7 @@ The `coeurf` binary serves the editor with its static files embedded. Set `COEUR
 
 ```
 just db-setup     # once: create the coeurf database and user (needs MariaDB root)
-just run          # serve on :8080 (COEURF_ADDR overrides)
+just run          # serve on :2547 (COEURF_ADDR overrides)
 just build        # single static binary ./coeurf
 ```
 
