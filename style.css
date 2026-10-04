@@ -364,3 +364,18 @@ input.hex-in {
 .tbl .icon-btn { flex: 1; border: none; padding: var(--sp-1) 0; justify-content: center; }
 .action-row:has(.s-add) { margin-bottom: var(--block-gap); }
 #a-list + .action-row { margin-top: 0; }
+
+/* Selection "marching ants": a dark base line with animated white dashes. */
+.ants { pointer-events: none; }
+.ants path, .ants circle {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.5px;
+}
+.ants-base path, .ants-base circle { stroke: #000; }
+.ants-dash path, .ants-dash circle {
+  stroke: #fff;
+  stroke-dasharray: 5 5;
+  animation: ants-march 0.5s linear infinite;
+}
+@keyframes ants-march { to { stroke-dashoffset: -10; } }
