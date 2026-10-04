@@ -126,9 +126,9 @@ test.describe("server storage", () => {
     await app.page.click("#open-btn");
     await expect(app.page.locator("#design-list li")).toHaveCount(1);
     await app.page.click("#design-list >> text=Open");
-    expect(await app.curves()).toHaveLength(1);
     await expect(app.page.locator("#remote-label")).toHaveText("stored · v1");
     await expect(app.page.locator("#open-dialog")).not.toBeVisible();
+    expect(await app.curves()).toHaveLength(1);
     await app.undoBtn.click();
     expect(await app.curves()).toHaveLength(0);
   });
@@ -141,8 +141,8 @@ test.describe("server storage", () => {
     await app.page.click("#design-list >> text=Versions");
     await expect(app.page.locator(".versions li")).toHaveCount(2);
     await app.page.locator(".versions li", { hasText: "Version 1" }).getByText("Open").click();
-    expect(await app.curves()).toHaveLength(0);
     await expect(app.page.locator("#remote-label")).toHaveText("history · v1");
+    expect(await app.curves()).toHaveLength(0);
 
     await app.page.click("#save-btn");
     await expect(app.page.locator("#remote-label")).toHaveText("history · v3");
