@@ -2741,9 +2741,12 @@ function onStageMouseMove(evt) {
         `<circle cx="${start.x}" cy="${start.y}" r="${rA}" fill="#2ecc71" stroke="#1b1d22" stroke-width="${lw}" opacity="0.6"></circle>`;
       return;
     }
-    if (hitTestCurve(toSvgPoint(evt))) {
+    const hoverCurve = hitTestCurve(toSvgPoint(evt));
+    if (hoverCurve) {
       svg.style.cursor = "grab";
-      previewLayer.innerHTML = "";
+      const c = hoverCurve;
+      previewLayer.innerHTML = isCurveSelected(c.id) ? "" :
+        `<path d="M ${c.p0.x} ${c.p0.y} C ${c.c1.x} ${c.c1.y}, ${c.c2.x} ${c.c2.y}, ${c.p3.x} ${c.p3.y}" fill="none" stroke="#5b8cff" stroke-width="${3/s}" stroke-linecap="round" opacity="0.55"></path>`;
       return;
     }
     svg.style.cursor = "crosshair";
