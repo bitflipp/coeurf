@@ -688,6 +688,7 @@ function restoreFromJSON(raw) {
 // Starts an empty design with default page settings and palette. Recorded in
 // history, so it can be undone.
 function newDesign() {
+  setRemote(null);
   restoreFromSnapshot(BLANK_DESIGN);
   pushHistory();
   showHint("New design.");
@@ -2882,6 +2883,176 @@ document.getElementById("import-input").addEventListener("change", evt => {
 });
 
 /* ---------------------------------------------------------------------- */
+/* Server storage (optional)                                               */
+/*                                                                          */
+/* Only available when the page is served by the coeurf binary with a       */
+/* database. Each Save appends an immutable version; any version can be     */
+/* reopened. Everything else works without it.                              */
+/* ---------------------------------------------------------------------- */
+
+const REMOTE_KEY = "coeurf:remote:v1";
+
+// The server design the canvas is linked to, or null: {id, name, version,
+// latest}. `version` is what was loaded or last saved; `latest` is the
+// version a save must build on, so saving never silently overwrites newer work.
+let remote = null;
+
+function setRemote(r) {
+  remote = r;
+  try {
+    if (r) localStorage.setItem(REMOTE_KEY, JSON.stringify(r));
+    else localStorage.removeItem(REMOTE_KEY);
+  } catch (e) { /* best-effort, like autosave */ }
+  document.getElementById("remote-label").textContent = r ? `${r.name} \u00b7 v${r.version}` : "";
+}
+
+async function api(method, path, body) {
+  const res = await fetch("/api" + path, {
+    method,
+    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  if (res.status !== 204) { try { data = await res.json(); } catch (e) { /* not JSON */ } }
+  if (!res.ok) throw Object.assign(new Error((data && data.error) || res.statusText), { status: res.status });
+  return data;
+}
+
+function linkFrom(d) { return { id: d.id, name: d.name, version: d.version, latest: d.latest }; }
+
+async function saveToServer(asNew) {
+  try {
+    let d;
+    if (asNew || !remote) {
+      const name = prompt("Name for the new design:", remote ? remote.name : "");
+      if (!name || !name.trim()) return;
+      d = await api("POST", "/designs", { name, data: cloneState() });
+    } else {
+      d = await api("PUT", `/designs/${remote.id}`, { data: cloneState(), base_version: remote.latest });
+      d.name = remote.name;
+    }
+    setRemote(linkFrom(d));
+    showHint(`Saved as version ${d.version}.`);
+  } catch (e) {
+    if (e.status === 404) { setRemote(null); showHint("That design no longer exists. Use Save as to store it again."); }
+    else if (e.status === 409) showHint("Changed elsewhere since you loaded it. Reopen it, or use Save as.");
+    else showHint("Save failed: " + e.message);
+  }
+}
+
+async function openFromServer(id, version) {
+  try {
+    const d = await api("GET", `/designs/${id}` + (version ? `/versions/${version}` : ""));
+    if (!d.data || !d.data.grid || !Array.isArray(d.data.curves)) throw new Error("not a cœurf design");
+    restoreFromSnapshot(d.data);
+    pushHistory();
+    setRemote(linkFrom(d));
+    document.getElementById("open-dialog").close();
+    showHint(`Opened ${d.name} (v${d.version}).`);
+  } catch (e) {
+    showHint("Open failed: " + e.message);
+  }
+}
+
+function listItem(parent, cls) {
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  parent.appendChild(li);
+  return li;
+}
+
+function addText(parent, tag, cls, text) {
+  const el = document.createElement(tag);
+  el.className = cls;
+  el.textContent = text;
+  parent.appendChild(el);
+  return el;
+}
+
+function addButton(parent, label, onClick) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  parent.appendChild(b);
+  return b;
+}
+
+function fmtDate(iso) { return new Date(iso).toLocaleString(); }
+
+async function showDesignList() {
+  const dialog = document.getElementById("open-dialog");
+  const list = document.getElementById("design-list");
+  let designs;
+  try { designs = await api("GET", "/designs"); }
+  catch (e) { showHint("Could not list designs: " + e.message); return; }
+  list.innerHTML = "";
+  if (!designs.length) addText(list, "li", "empty", "Nothing stored yet. Use Save to store this design.");
+  for (const d of designs) {
+    const li = listItem(list);
+    const row = document.createElement("div");
+    row.className = "row";
+    li.appendChild(row);
+    addText(row, "span", "name", d.name);
+    addText(row, "span", "meta", `v${d.version} \u00b7 ${fmtDate(d.updated_at)}`);
+    addButton(row, "Open", () => openFromServer(d.id));
+    addButton(row, "Versions", () => toggleVersions(li, d));
+    addButton(row, "Rename", async () => {
+      const name = prompt("New name:", d.name);
+      if (!name || !name.trim()) return;
+      try {
+        await api("PATCH", `/designs/${d.id}`, { name });
+        if (remote && remote.id === d.id) setRemote({ ...remote, name: name.trim() });
+        showDesignList();
+      } catch (e) { showHint("Rename failed: " + e.message); }
+    });
+    addButton(row, "Delete", async () => {
+      if (!confirm(`Delete "${d.name}" and all its versions?`)) return;
+      try {
+        await api("DELETE", `/designs/${d.id}`);
+        if (remote && remote.id === d.id) setRemote(null);
+        showDesignList();
+      } catch (e) { showHint("Delete failed: " + e.message); }
+    });
+  }
+  if (!dialog.open) dialog.showModal();
+}
+
+async function toggleVersions(li, d) {
+  const existing = li.querySelector(".versions");
+  if (existing) { existing.remove(); return; }
+  let versions;
+  try { versions = await api("GET", `/designs/${d.id}/versions`); }
+  catch (e) { showHint("Could not list versions: " + e.message); return; }
+  const ul = document.createElement("ul");
+  ul.className = "versions";
+  li.appendChild(ul);
+  for (const v of versions) {
+    const row = document.createElement("div");
+    row.className = "row";
+    listItem(ul).appendChild(row);
+    addText(row, "span", "name", `Version ${v.version}`);
+    addText(row, "span", "meta", fmtDate(v.created_at));
+    addButton(row, "Open", () => openFromServer(d.id, v.version));
+  }
+}
+
+// Reveals the storage controls if (and only if) the server has storage.
+async function initServerStorage() {
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok || !(await res.json()).storage) return;
+  } catch (e) { return; }
+  document.getElementById("storage-group").hidden = false;
+  document.getElementById("open-btn").addEventListener("click", showDesignList);
+  document.getElementById("save-btn").addEventListener("click", () => saveToServer(false));
+  document.getElementById("save-as-btn").addEventListener("click", () => saveToServer(true));
+  try {
+    const r = JSON.parse(localStorage.getItem(REMOTE_KEY));
+    if (r && r.id) setRemote(r);
+  } catch (e) { /* no link */ }
+}
+
+/* ---------------------------------------------------------------------- */
 /* Export                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -2920,6 +3091,7 @@ function init() {
   setTool("curve");
   fitToScreen();
   window.addEventListener("resize", render);
+  initServerStorage();
 }
 
 init();

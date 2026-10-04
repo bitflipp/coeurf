@@ -18,8 +18,9 @@ Points can snap to a grid, but every curve also carries anchors that other curve
 - **Arrange and mirror**: reorder curves (front/back), mirror a curve across its own endpoints, or across the page's horizontal or vertical axis
 - **Page settings**: set the page size and zoom or fit the canvas to the window
 - **Undo/redo and auto-save**: your work is kept in `localStorage`
+- **Optional server storage**: when served by the `coeurf` binary with a database, designs can be saved to the server. Every save adds an immutable version, and any earlier version can be reopened
 - **Import/export**: download and import designs as JSON, or export the artwork as SVG
-- **No build step and no runtime dependencies**: plain HTML, CSS, and JavaScript
+- **No build step and no runtime dependencies in the browser**: plain HTML, CSS, and JavaScript
 
 ## Usage
 
@@ -30,6 +31,20 @@ python3 -m http.server 8000
 ```
 
 Then visit <http://localhost:8000>.
+
+### Server storage (optional)
+
+The `coeurf` binary serves the editor with its static files embedded. Set `COEURF_DB_DSN` to a MariaDB/MySQL DSN and the toolbar gains **Open…**, **Save** and **Save as…**; without it (or with any plain static server) the editor works as before, using only `localStorage`.
+
+```
+just db-setup     # once: create the coeurf database and user (needs MariaDB root)
+just run          # serve on :8080 (COEURF_ADDR overrides)
+just build        # single static binary ./coeurf
+```
+
+- The DSN must contain `parseTime=true`, e.g. `coeurf:coeurf@/coeurf?parseTime=true`. Tables are created on startup.
+- **Save** appends a new version of the linked design. If someone else saved in between, it is refused instead of overwriting; use **Save as…** to keep your copy. **Open…** lists designs, their versions, and offers rename and delete. Opening an old version and saving puts it on top as a new version.
+- `localStorage` autosave stays on and is independent of server saves.
 
 ### Anchors and snapping
 
@@ -59,16 +74,18 @@ Then visit <http://localhost:8000>.
 ## Requirements
 
 - A modern web browser
-- Any static file server (e.g. Python 3's `http.server`)
+- Any static file server (e.g. Python 3's `http.server`), or the Go binary
+- For server storage: Go, [just](https://just.systems) and MariaDB or MySQL
 
 ## Running the tests
 
-Browser tests use [Playwright](https://playwright.dev):
+`just test` runs everything. The Go tests include repository tests against a real database (`COEURF_DB_DSN`, which `just` defaults to the DSN above; they skip if it is unset) and clean up after themselves. Browser tests use [Playwright](https://playwright.dev) with a mocked API:
 
 ```bash
 npm install
 npx playwright install chromium
-npm test
+just test-go
+just test-e2e
 ```
 
 ## License

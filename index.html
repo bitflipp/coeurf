@@ -24,6 +24,13 @@
     <input id="import-input" type="file" accept="application/json,.json" hidden>
   </div>
 
+  <div class="tool-group" id="storage-group" hidden>
+    <button id="open-btn" title="Open a design stored on the server">Open&hellip;</button>
+    <button id="save-btn" title="Save as a new version on the server">Save</button>
+    <button id="save-as-btn" title="Save as a new design on the server">Save as&hellip;</button>
+    <span id="remote-label"></span>
+  </div>
+
   <div class="tool-group">
     <button id="export-btn">Export SVG</button>
   </div>
@@ -54,6 +61,12 @@
     <svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg>
   </div>
 </main>
+
+<dialog id="open-dialog">
+  <h2>Stored designs</h2>
+  <ul id="design-list"></ul>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
 
 <div id="hint">Click a curve to select it, or click empty canvas (or an anchor) to start a new one.</div>
 
