@@ -88,6 +88,13 @@ just test-go
 just test-e2e
 ```
 
+## AI assistance
+
+Parts of this project were written with AI assistance. The models involved:
+
+- Claude Sonnet
+- DeepSeek Flash
+
 ## License
 
 MIT
