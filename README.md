@@ -13,6 +13,7 @@ Points can snap to a grid, but every curve also carries anchors that other curve
 - **Anchors**: each curve has start/end anchors plus any number of extra ones, placed by arc length. Add them with presets (mid, thirds, quarters, divide evenly), the panel, or by double-clicking the selected curve; drag to slide, double-click to remove
 - **Attached curves**: endpoints snap to other curves' anchors and stay attached, so moving, reshaping or sliding the host drags attached curves along. Optional *tangent* anchors also lock the attached curve's control point onto the host's tangent
 - **Symbols**: select curves (a leaf, say) and press *Make symbol*, then place copies with the Symbol tool by clicking a start and an end point. Each instance is rotated and scaled to fit between its two pins (optionally mirrored), pins snap and stay attached to anchors, and editing the template curves updates every instance
+- **Fills**: click inside an area that curves enclose with the Fill tool, or select a closed loop and press *Fill selection*. A fill stores its boundary as a list of curves, so reshaping any of them reshapes the fill; it takes the same solid or gradient colors, per-stop opacity, and *Exclude from SVG* as a curve, and shares one paint order with the curves so it can be stacked above or below them. An open or branching boundary is refused rather than silently closed
 - **Curve styling**: solid or gradient colors, per-stop opacity, and tapered strokes
 - **Palette**: a shared palette is the single source of colors for all other tools
 - **Arrange and mirror**: reorder curves (front/back), mirror a curve across its own endpoints, or across the page's horizontal or vertical axis
@@ -60,14 +61,24 @@ just build        # single static binary ./coeurf
 - In the Curve tool, click an instance to select it, drag it to move it, or drag one of its pins to rotate and scale it or attach it to another anchor. Instances can be duplicated, detached into plain curves, or reordered.
 - Deleting a template curve dissolves its symbol; the instances remain as plain curves.
 
+### Fills
+
+- With the Fill tool (`F`), click inside an area that curves enclose; a hovered area is previewed with a wash and a dashed outline. Clicking an area that is already filled selects that fill instead of stacking another copy on it.
+- The boundary is discovered from the curves themselves, so the ends must actually meet: snap them to an anchor (or leave them within a couple of pixels) and let nothing branch off the loop. An open boundary is refused with a hint rather than closed for you.
+- To fill a loop you already have selected — the four arcs of a circle, say — press **Fill selection** in the panel. The same closure rules apply.
+- Curves and fills share one paint order. A new fill starts *behind* every stroke, so a curve's outline reads on top of the area it encloses, but *Bring forward* / *Bring to front* (or `]` / `[`) lift it past the curves it overlaps and *Send backward* / *Send to back* push it down again. A stroke can therefore sit under one fill and over another.
+- A fill is styled like a curve: palette color or gradient with a stop table, flat or gradient opacity, and *Exclude from SVG*.
+- Because the fill is derived from its boundary, dragging, reshaping or sliding a boundary curve reshapes the fill with it. Deleting a boundary curve drops it from the loop, and a loop that no longer closes dissolves its fill. **Select boundary curves** hands them back to the Curve tool.
+- Nested loops take the innermost area containing the click. A single-loop fill covers its whole interior, so paint an inner boundary as its own fill to cover it.
+
 ### Shortcuts
 
 | Key | Action |
 |---|---|
-| `P` / `G` / `L` / `C` / `O` / `S` | Page / Grid / Palette / Curve / Circle / Symbol tool |
+| `P` / `G` / `L` / `C` / `O` / `S` / `F` | Page / Grid / Palette / Curve / Circle / Symbol / Fill tool |
 | `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` | Undo / redo |
-| `]` / `[` | Bring forward / send backward (hold `Shift` for front / back) |
-| `Delete` / `Backspace` | Delete the selected curve |
+| `]` / `[` | Bring forward / send backward (hold `Shift` for front / back; works on fills too) |
+| `Delete` / `Backspace` | Delete the selected curve(s), fill, or symbol instance |
 | `Esc` | Cancel / deselect |
 | `Ctrl/Cmd` `+` / `-` / `0` | Zoom in / out / reset |
 

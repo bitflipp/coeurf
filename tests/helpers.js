@@ -26,7 +26,7 @@ function curve(p0, p3, extra = {}) {
   };
 }
 
-function design({ curves = [], grid = {}, palette } = {}) {
+function design({ curves = [], grid = {}, palette, fills = [] } = {}) {
   return {
     grid: {
       width: 800, height: 600, resolution: 20,
@@ -34,6 +34,7 @@ function design({ curves = [], grid = {}, palette } = {}) {
     },
     palette: palette || ["#2a2d34", "#ffffff", "#e6453c", "#ffb020", "#2ecc71", "#5b8cff", "#c14bff"],
     curves,
+    fills,
     curveIdCounter: curves.length + 1,
   };
 }
@@ -43,10 +44,11 @@ class App {
 
   // --- state access (top-level `const state` is reachable from evaluate) ---
   state() { return this.page.evaluate(() => JSON.parse(JSON.stringify({
-    grid: state.grid, palette: state.palette, curves: state.curves,
-    selection: state.selection, tool: state.tool,
+    grid: state.grid, palette: state.palette, curves: state.curves, fills: state.fills,
+    order: state.order, selection: state.selection, tool: state.tool,
   }))); }
   curves() { return this.page.evaluate(() => JSON.parse(JSON.stringify(state.curves))); }
+  fills() { return this.page.evaluate(() => JSON.parse(JSON.stringify(state.fills))); }
   saved() { return this.page.evaluate(k => JSON.parse(localStorage.getItem(k)), STORAGE_KEY); }
 
   // Seed a design through autosave and reload, like a returning user.
@@ -93,6 +95,8 @@ class App {
   zoomLabel() { return this.page.locator("#zoom-level-btn"); }
   // The <path> elements actually painted for curves.
   curvePaths() { return this.page.locator("#stage path[data-curve-id]"); }
+  // The <path> elements actually painted for fills.
+  fillPaths() { return this.page.locator("#stage path[data-fill-id]"); }
 }
 
 module.exports = { test, expect, curve, design, STORAGE_KEY };

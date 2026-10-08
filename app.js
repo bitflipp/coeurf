@@ -230,7 +230,9 @@ function resolveLinks() {
     for (const c of state.curves) {
       if (!c.links) continue;
       for (const end of ["p0", "p3"]) {
-        if (!c.links[end]) continue;
+        // Re-checked every pass: dropping the p0 link above can delete `links`
+        // outright (setLink removes the object once it is empty).
+        if (!c.links || !c.links[end]) continue;
         const la = linkedAnchor(c, end);
         if (!la) { setLink(c, end, null); continue; }
         const f = curveFrame(la.host, la.anchor.s);
@@ -261,6 +263,8 @@ function resolveLinks() {
     }
     if (!changed) break;
   }
+  pruneFills(); // a fill whose boundary lost a curve dissolves with it
+  syncDrawOrder(); // and its key leaves the paint order with it
 }
 
 /* ---------------------------------------------------------------------- */
@@ -456,15 +460,17 @@ const state = {
   grid: { width: 800, height: 600, resolution: 20, snap: true, visible: true, specialLines: { center: false, thirds: false, golden: false } },
   palette: DEFAULT_PALETTE.slice(),   // hex strings; the only colors other tools can pick from
   curves: [],        // {id, p0,c1,c2,p3, anchors, links?, width, width2?, drift?, color, colorMode?, stops?, gradientAngle?, opacity?, opacityMode?, opacityStops?, opacityAngle?}
-  selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'instance', id}
-  tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle" | "symbol"
+  selection: null,    // {type:'curve', id} | {type:'curves', ids} | {type:'instance', id} | {type:'fill', id}
+  tool: "curve",      // "page" | "grid" | "palette" | "curve" | "circle" | "symbol" | "fill"
   symbols: [],       // {id, name, curves: [templateIds], pinA/pinB: {curve, anchor}}
   instances: [],     // {id, symbol, a, b, flip, links?: {a?, b?}}
+  fills: [],         // {id, edges: [{curve, rev}], color, colorMode?, stops?, gradientAngle?, opacity?, opacityMode?, opacityStops?, opacityAngle?, fillRule?, noExport?}
+  order: [],         // paint order, bottom to top: "c:<curve id>" / "f:<fill id>"
   curveIdCounter: 1,
 };
 
 const BLANK_DESIGN = JSON.parse(JSON.stringify({
-  grid: state.grid, palette: state.palette, curves: [], symbols: [], instances: [], curveIdCounter: 1,
+  grid: state.grid, palette: state.palette, curves: [], symbols: [], instances: [], fills: [], order: [], curveIdCounter: 1,
 }));
 
 let drawPending = null; // {x,y,link?} start point while placing a new curve
@@ -474,6 +480,388 @@ let dragCtx = null;    // active drag context
 let symbolPending = null; // {x,y,link?} start pin while placing a symbol instance (Symbol tool)
 let activeSymbolId = null; // symbol the Symbol tool places
 let symbolFlip = false;    // whether the Symbol tool places mirrored instances
+
+/* ---------------------------------------------------------------------- */
+/* Paint order                                                             */
+/*                                                                          */
+/* state.order lists every drawable - "c:<curve id>" or "f:<fill id>" -      */
+/* bottom to top, so fills and curves share one stack and either kind can be  */
+/* moved past the other. state.curves and state.fills stay the lookup tables; */
+/* their relative order is kept in step with state.order, which is what the   */
+/* arrange buttons report.                                                  */
+/* ---------------------------------------------------------------------- */
+
+function curveKey(id) { return "c:" + id; }
+function fillKey(id) { return "f:" + id; }
+
+function drawableAt(key) {
+  return key[0] === "c"
+    ? state.curves.find(c => c.id === key.slice(2))
+    : state.fills.find(f => f.id === key.slice(2));
+}
+
+// Drops keys whose drawable is gone (a deleted curve, a dissolved fill) and
+// registers anything missing on top. A design saved before paint order existed
+// restores with an empty order, and seeding it fills-then-curves reproduces
+// exactly the layering those designs were drawn with.
+function syncDrawOrder() {
+  const live = new Set();
+  const order = [];
+  for (const key of state.order) {
+    if (live.has(key) || !drawableAt(key)) continue;
+    live.add(key);
+    order.push(key);
+  }
+  for (const f of state.fills) {
+    const key = fillKey(f.id);
+    if (!live.has(key)) { live.add(key); order.push(key); }
+  }
+  for (const c of state.curves) {
+    const key = curveKey(c.id);
+    if (!live.has(key)) { live.add(key); order.push(key); }
+  }
+  state.order = order;
+}
+
+// Keeps the lookup arrays' order matching the stack, so "array order is paint
+// order" still reads true for the curves array and the fill list.
+function sortRegistriesByOrder() {
+  const rank = new Map(state.order.map((key, i) => [key, i]));
+  const at = key => (rank.has(key) ? rank.get(key) : Infinity);
+  state.curves.sort((a, b) => at(curveKey(a.id)) - at(curveKey(b.id)));
+  state.fills.sort((a, b) => at(fillKey(a.id)) - at(fillKey(b.id)));
+}
+
+// The keys a reorder moves: one fill, one curve, several curves, or all of an
+// instance's curves.
+function selectedKeys() {
+  const sel = state.selection;
+  if (!sel) return [];
+  if (sel.type === "curve") return [curveKey(sel.id)];
+  if (sel.type === "fill") return [fillKey(sel.id)];
+  if (sel.type === "curves") return sel.ids.map(curveKey);
+  if (sel.type === "instance") return instanceCurveIds(sel.id).map(curveKey);
+  return [];
+}
+
+/* ---------------------------------------------------------------------- */
+/* Fills: regions enclosed by a loop of curves                             */
+/*                                                                          */
+/* A fill stores its boundary as an ordered list of {curve, rev} edges and  */
+/* derives the path on every render, so reshaping or sliding a boundary      */
+/* curve reshapes the fill with no extra bookkeeping - the same trick symbol */
+/* instances use. Loops are found by building the planar graph of curve      */
+/* endpoints and walking its faces: only bounded faces (positive area in the */
+/* page's y-down coordinates) can be filled, so a chain with a free end has  */
+/* no face to click and is refused instead of being closed behind the user's */
+/* back.                                                                     */
+/* ---------------------------------------------------------------------- */
+
+// Free (unlinked) endpoints this close together count as joined; linked ones
+// already land exactly on top of each other once resolveLinks() has run.
+const FILL_JOIN_TOL = 2;
+const FILL_MIN_AREA = 1; // design units²; ignores degenerate slivers
+
+// Direction in which a curve leaves one of its endpoints, used to sort the
+// half-edges around a node. A control point sitting on its endpoint leaves no
+// usable direction, so fall back to the chord.
+function endDirection(c, fromStart) {
+  const p = fromStart ? c.p0 : c.p3;
+  const k = fromStart ? c.c1 : c.c2;
+  let dx = k.x - p.x, dy = k.y - p.y;
+  if (Math.hypot(dx, dy) < TANGENT_EPS) {
+    const q = fromStart ? c.p3 : c.p0;
+    dx = q.x - p.x; dy = q.y - p.y;
+  }
+  const len = Math.hypot(dx, dy);
+  return len < 1e-9 ? { x: 1, y: 0 } : { x: dx / len, y: dy / len };
+}
+
+// Endpoints that coincide become one node. Half-edges come in twins: 2i leaves
+// curve i at its start, 2i+1 leaves it at its end, so `id ^ 1` is the same
+// curve traversed the other way.
+function buildPlanarGraph(ids) {
+  const curves = state.curves.filter(c => !ids || ids.has(c.id));
+  const nodes = [];
+  const nodeAt = p => {
+    for (const n of nodes) if (Math.hypot(n.x - p.x, n.y - p.y) <= FILL_JOIN_TOL) return n;
+    const n = { x: p.x, y: p.y, hedges: [] };
+    nodes.push(n);
+    return n;
+  };
+  const hedges = [];
+  for (const c of curves) {
+    const a = nodeAt(c.p0), b = nodeAt(c.p3);
+    const mk = (id, from, to, rev) => {
+      const d = endDirection(c, !rev);
+      return { id, curve: c, rev, from, to, angle: Math.atan2(d.y, d.x) };
+    };
+    const fwd = mk(hedges.length, a, b, false);
+    const back = mk(hedges.length + 1, b, a, true);
+    hedges.push(fwd, back);
+    a.hedges.push(fwd);
+    b.hedges.push(back);
+  }
+  for (const n of nodes) n.hedges.sort((p, q) => p.angle - q.angle);
+  return { curves, nodes, hedges };
+}
+
+// Planar faces of that embedding, each as the list of half-edges around it.
+// Arriving along a half-edge, we leave by the neighbour immediately before its
+// twin in the node's angular order; `next` is a permutation of the half-edges,
+// so walking it visits every face exactly once. Bounded faces come out with
+// positive shoelace area in y-down page coordinates, unbounded ones negative.
+function enumerateFaces(graph) {
+  const next = h => {
+    const t = graph.hedges[h.id ^ 1];
+    const ring = t.from.hedges;
+    return ring[(ring.indexOf(t) - 1 + ring.length) % ring.length];
+  };
+  const faces = [], seen = new Set();
+  for (const start of graph.hedges) {
+    if (seen.has(start.id)) continue;
+    const walk = [];
+    let h = start;
+    while (!seen.has(h.id)) { // a self-loop is its own one-edge face
+      seen.add(h.id);
+      walk.push(h);
+      h = next(h);
+    }
+    faces.push(walk);
+  }
+  return faces;
+}
+
+// An edge is written down as {curve: id, rev}; half-edges carry the curve
+// object itself, so accept both everywhere edges are resolved.
+function edgeCurve(e) {
+  return typeof e.curve === "string" ? state.curves.find(c => c.id === e.curve) : e.curve;
+}
+
+// Start, both controls, end of an edge in traversal order.
+function edgePoints(e) {
+  const c = edgeCurve(e);
+  if (!c) return null;
+  return e.rev ? [c.p3, c.c2, c.c1, c.p0] : [c.p0, c.c1, c.c2, c.p3];
+}
+
+// Flattened outline of an ordered edge list. Each edge continues from the
+// previous one, so every edge but the first drops its duplicated first point.
+function concatFlattened(edges) {
+  const pts = [];
+  for (const e of edges) {
+    const p = edgePoints(e);
+    if (!p) continue;
+    const flat = flattenCubic(p[0], p[1], p[2], p[3], FLATTEN_SEGMENTS);
+    for (let i = pts.length ? 1 : 0; i < flat.length; i++) pts.push(flat[i]);
+  }
+  return pts;
+}
+
+function polygonArea(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+function pointInPolygon(pt, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if ((a.y > pt.y) !== (b.y > pt.y) &&
+        pt.x < ((b.x - a.x) * (pt.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+function pointsBox(pts) {
+  if (!pts.length) return { x: 0, y: 0, w: 0, h: 0 };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+  }
+  return { x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) };
+}
+
+// One continuous subpath: the edges run into each other, and a hairline L
+// bridges the sub-tolerance gap left where two endpoints were only near
+// enough to count as joined.
+function fillPathData(f) {
+  const segs = f.edges.map(edgePoints).filter(Boolean);
+  if (!segs.length) return "";
+  let d = `M ${fmt(segs[0][0].x)} ${fmt(segs[0][0].y)}`, prev = null;
+  for (const [a, k1, k2, b] of segs) {
+    if (prev && Math.hypot(a.x - prev.x, a.y - prev.y) > 1e-6) d += ` L ${fmt(a.x)} ${fmt(a.y)}`;
+    d += ` C ${fmt(k1.x)} ${fmt(k1.y)}, ${fmt(k2.x)} ${fmt(k2.y)}, ${fmt(b.x)} ${fmt(b.y)}`;
+    prev = b;
+  }
+  return d + " Z";
+}
+
+function fillPoints(f) { return concatFlattened(f.edges); }
+
+// The single bounded face that uses exactly these curves, or null when they
+// are open, branch, or form several separate loops.
+function loopFromCurves(ids) {
+  const graph = buildPlanarGraph(ids);
+  if (!graph.curves.length) return null;
+  for (const walk of enumerateFaces(graph)) {
+    if (walk.length !== graph.curves.length) continue;
+    if (polygonArea(concatFlattened(walk)) <= FILL_MIN_AREA) continue;
+    return walk.map(h => ({ curve: h.curve.id, rev: h.rev }));
+  }
+  return null;
+}
+
+// The innermost bounded face containing pt, or null when pt is not enclosed.
+function faceAt(pt) {
+  const graph = buildPlanarGraph(null);
+  let best = null, bestArea = Infinity;
+  for (const walk of enumerateFaces(graph)) {
+    const pts = concatFlattened(walk);
+    const area = polygonArea(pts);
+    if (area <= FILL_MIN_AREA || area >= bestArea) continue;
+    if (!pointInPolygon(pt, pts)) continue;
+    bestArea = area;
+    best = walk;
+  }
+  return best && best.map(h => ({ curve: h.curve.id, rev: h.rev }));
+}
+
+// Whether an edge list still forms a closed loop once every edge's curve is
+// present - i.e. consecutive ends meet and the last returns to the first.
+function loopCloses(edges) {
+  if (!edges.length) return false;
+  const ends = [];
+  for (const e of edges) {
+    const p = edgePoints(e);
+    if (!p) return false;
+    ends.push([p[0], p[3]]);
+  }
+  for (let i = 0; i < ends.length; i++) {
+    const [, b] = ends[i], [a] = ends[(i + 1) % ends.length];
+    if (Math.hypot(a.x - b.x, a.y - b.y) > FILL_JOIN_TOL) return false;
+  }
+  return true;
+}
+
+// Deleting a boundary curve drops it from every fill; a fill whose loop no
+// longer closes (an arc was removed from a circle, say) dissolves with it.
+function pruneFills() {
+  if (!state.fills || !state.fills.length) return;
+  for (const f of state.fills) {
+    f.edges = f.edges.filter(e => edgeCurve(e));
+  }
+  state.fills = state.fills.filter(f => loopCloses(f.edges));
+}
+
+// A new fill starts in the palette's currently selected color, like a curve.
+function newFill(edges) {
+  const f = {
+    id: "fl" + (state.curveIdCounter++),
+    edges: edges.map(e => ({ curve: edgeCurve(e).id, rev: !!e.rev })),
+    color: state.palette[paletteSelected] || "#2a2d34",
+    colorMode: "solid",
+    opacity: 1,
+  };
+  state.fills.push(f);
+  // A new fill starts behind every stroke - the layer it belongs to - rather
+  // than on top of the artwork; the arrange buttons can lift it past them.
+  syncDrawOrder(); // registers it (on top, as a new drawable)
+  const key = fillKey(f.id);
+  state.order.splice(state.order.indexOf(key), 1);
+  const firstCurve = state.order.findIndex(k => k[0] === "c");
+  state.order.splice(firstCurve < 0 ? state.order.length : firstCurve, 0, key);
+  return f;
+}
+
+// Two edge lists describe the same loop when they traverse the same curves the
+// same way round (a simple cycle is pinned down by its edge set).
+function sameLoop(a, b) {
+  if (a.length !== b.length) return false;
+  const key = e => e.curve + (e.rev ? "!" : "");
+  const A = new Set(a.map(key)), B = new Set(b.map(key));
+  return A.size === B.size && [...A].every(k => B.has(k));
+}
+
+function fillGradientId(id) {
+  return "fill-grad-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
+}
+
+function fillOpacityMaskId(id) {
+  return "fill-opmask-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
+}
+
+function fillOpacityInfo(f, box) {
+  const pad = 1; // keep the mask off the anti-aliased edge
+  return boxOpacityInfo(f, fillOpacityMaskId(f.id), box,
+    { x: box.x - pad, y: box.y - pad, w: box.w + 2 * pad, h: box.h + 2 * pad });
+}
+
+// One fill: its paint defs (gradient and opacity mask), the filled path, and
+// the marchers that show it as selected.
+function fillChunk(f, selected) {
+  const d = fillPathData(f);
+  if (!d) return null;
+  const box = pointsBox(fillPoints(f));
+  let defs = "";
+  let paint;
+  if (f.colorMode === "gradient" && f.stops) {
+    const gid = fillGradientId(f.id);
+    defs += `<linearGradient id="${gid}" ${gradientAttrs(f.gradientAngle || 0, box.x, box.y, box.w, box.h)}>` +
+      f.stops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
+      `</linearGradient>`;
+    paint = `url(#${gid})`;
+  } else {
+    paint = f.color;
+  }
+  const op = fillOpacityInfo(f, box);
+  defs += op.defs;
+  const rule = f.fillRule === "evenodd" ? ` fill-rule="evenodd"` : "";
+  const el = `<path d="${d}" fill="${paint}"${rule} data-fill-id="${escapeAttr(f.id)}"></path>`;
+  return { defs, body: op.attr ? `<g${op.attr}>${el}</g>` : el, ants: selected ? `<path d="${d}"></path>` : "" };
+}
+
+// Marching-ants outline marking a selection: a dark base line with animated
+// white dashes over it (see .ants in style.css).
+function antsGroups(body) {
+  return `<g class="ants ants-base">${body}</g><g class="ants ants-dash">${body}</g>`;
+}
+
+// Whether the drawable a paint-order key names is part of the selection. An
+// instance selection lights up its own pins instead (see renderHandles), so
+// its curves are not marked here.
+function isSelected(key) {
+  const sel = state.selection;
+  if (!sel) return false;
+  if (key[0] === "f") return sel.type === "fill" && fillKey(sel.id) === key;
+  if (sel.type === "curve") return curveKey(sel.id) === key;
+  if (sel.type === "curves") return sel.ids.some(id => curveKey(id) === key);
+  return false;
+}
+
+// Everything on the canvas, bottom to top, in state.order - so a fill and a
+// curve can be stacked in any combination. `forExport` leaves out the
+// drawables marked Exclude from SVG and the selection marchers with them.
+function artMarkup({ forExport = false } = {}) {
+  syncDrawOrder();
+  let defs = "", body = "", antsBody = "";
+  for (const key of state.order) {
+    const d = drawableAt(key);
+    if (!d || (forExport && d.noExport)) continue;
+    const selected = !forExport && isSelected(key);
+    const chunk = key[0] === "f" ? fillChunk(d, selected) : curveChunk(d, selected);
+    if (!chunk) continue;
+    defs += chunk.defs;
+    body += chunk.body;
+    antsBody += chunk.ants;
+  }
+  return { defs, body: antsBody ? body + antsGroups(antsBody) : body };
+}
 
 // Which sub-panel the Page tool shows - purely a UI concern (like `zoom`),
 // so it's kept out of `state` and never saved/undone.
@@ -585,6 +973,8 @@ function cloneState() {
     curves: state.curves,
     symbols: state.symbols,
     instances: state.instances,
+    fills: state.fills,
+    order: state.order,
     curveIdCounter: state.curveIdCounter,
   }));
 }
@@ -607,6 +997,17 @@ function restoreFromSnapshot(snap) {
   for (const k of Object.keys(state.grid)) if (k.startsWith("border")) delete state.grid[k];
   state.symbols = JSON.parse(JSON.stringify(snap.symbols || []));
   state.instances = JSON.parse(JSON.stringify(snap.instances || []));
+  // Designs saved before fills existed have none; every fill carries its
+  // boundary as plain curve ids, so restoring is just stopping the migration.
+  state.fills = JSON.parse(JSON.stringify(snap.fills || []));
+  for (const f of state.fills) {
+    if (!Array.isArray(f.edges)) f.edges = [];
+    migrateStops(f);
+  }
+  // Designs saved before fills (or before paint order) have no order; the
+  // rebuild seeds it from the curves and fills themselves.
+  state.order = Array.isArray(snap.order) ? snap.order.slice() : [];
+  syncDrawOrder();
   resolveLinks();
   state.palette = Array.isArray(snap.palette) ? snap.palette.slice() : paletteFromUsedColors(snap);
   state.curveIdCounter = snap.curveIdCounter;
@@ -622,6 +1023,10 @@ function paletteFromUsedColors(snap) {
   for (const c of snap.curves) {
     add(c.color);
     if (c.colorMode === "gradient") { add(c.color2); for (const t of c.stops || []) add(t.color); }
+  }
+  for (const f of snap.fills || []) {
+    add(f.color);
+    for (const t of f.stops || []) add(t.color);
   }
   return seen.size ? [...seen] : DEFAULT_PALETTE.slice();
 }
@@ -731,7 +1136,7 @@ function fmt(n) { return Math.round(n * 100) / 100; }
 /* ---------------------------------------------------------------------- */
 
 const svg = document.getElementById("stage");
-let gridLayer, curvesLayer, handlesLayer, previewLayer, defsLayer;
+let gridLayer, artLayer, handlesLayer, previewLayer, defsLayer;
 
 // Stacking order matters: curve strokes, then the grid (on top so toggling
 // it is actually visible over any curve instead of being buried under it),
@@ -740,8 +1145,10 @@ let gridLayer, curvesLayer, handlesLayer, previewLayer, defsLayer;
 function ensureLayers() {
   svg.innerHTML = "";
   defsLayer = document.createElementNS(SVGNS, "defs");
-  curvesLayer = document.createElementNS(SVGNS, "g");
-  curvesLayer.setAttribute("id", "layer-curves");
+  // Curves and fills share one layer and paint in state.order, so either kind
+  // can be stacked above the other; the marchers come last, on top of both.
+  artLayer = document.createElementNS(SVGNS, "g");
+  artLayer.setAttribute("id", "layer-art");
   gridLayer = document.createElementNS(SVGNS, "g");
   gridLayer.setAttribute("id", "layer-grid");
   gridLayer.style.pointerEvents = "none";
@@ -751,7 +1158,7 @@ function ensureLayers() {
   previewLayer.setAttribute("id", "layer-preview");
   previewLayer.style.pointerEvents = "none";
   svg.appendChild(defsLayer);
-  svg.appendChild(curvesLayer);
+  svg.appendChild(artLayer);
   svg.appendChild(gridLayer);
   svg.appendChild(handlesLayer);
   svg.appendChild(previewLayer);
@@ -848,26 +1255,29 @@ function curveOpacityMaskId(id) {
   return "curve-opmask-" + String(id).replace(/[^a-zA-Z0-9]/g, "_");
 }
 
-// Opacity is applied to a group wrapping all of a curve's elements, so the
+// Opacity is applied to a group wrapping all of an object's elements, so the
 // overlapping ribbon and cap discs of a tapered curve don't double up. A flat
 // opacity is a plain attribute; a gradient is a luminance-free alpha mask
-// (white stops with varying stop-opacity) whose gradient line spans the curve's
-// tight bounds, inside a padded mask region.
-function curveOpacityInfo(c) {
-  const a0 = c.opacity != null ? c.opacity : 1;
-  if (c.opacityMode === "gradient" && c.opacityStops) {
-    const mid = curveOpacityMaskId(c.id);
-    const gb = curveBox(c);
-    const { x, y, w, h } = curveMaskRegion(c);
-    const defs = `<linearGradient id="${mid}-g" ${gradientAttrs(c.opacityAngle || 0, gb.x, gb.y, gb.w, gb.h)}>` +
-      c.opacityStops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="#fff" stop-opacity="${t.a}"/>`).join("") +
+// (white stops with varying stop-opacity) whose gradient line spans the object's
+// tight bounds, inside a mask region wide enough to cover it. Shared by curves
+// and fills, which differ only in how their bounds are measured.
+function boxOpacityInfo(o, maskId, box, region) {
+  const a0 = o.opacity != null ? o.opacity : 1;
+  if (o.opacityMode === "gradient" && o.opacityStops) {
+    const { x, y, w, h } = region;
+    const defs = `<linearGradient id="${maskId}-g" ${gradientAttrs(o.opacityAngle || 0, box.x, box.y, box.w, box.h)}>` +
+      o.opacityStops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="#fff" stop-opacity="${t.a}"/>`).join("") +
       `</linearGradient>` +
-      `<mask id="${mid}" maskUnits="userSpaceOnUse" x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}">` +
-      `<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="url(#${mid}-g)"/>` +
+      `<mask id="${maskId}" maskUnits="userSpaceOnUse" x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}">` +
+      `<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="url(#${maskId}-g)"/>` +
       `</mask>`;
-    return { defs, attr: ` mask="url(#${mid})"` };
+    return { defs, attr: ` mask="url(#${maskId})"` };
   }
   return { defs: "", attr: a0 < 1 ? ` opacity="${a0}"` : "" };
+}
+
+function curveOpacityInfo(c) {
+  return boxOpacityInfo(c, curveOpacityMaskId(c.id), curveBox(c), curveMaskRegion(c));
 }
 
 // Below this, a tangent is treated as "zero" - i.e. the curve's own control
@@ -960,59 +1370,69 @@ function isCurveSelected(id) {
   return false;
 }
 
-function curvesMarkup(curves, includeSelection = true) {
+// One curve: its paint defs (gradient and opacity mask), the stroked or
+// ribbon-filled markup, and its marching-ants outline when selected.
+function curveChunk(c, selected) {
+  const w0 = c.width;
+  const w1 = c.width2 != null ? c.width2 : c.width;
+  // The ribbon path is what carries the "drift" bulge (see offsetBezierRail),
+  // so it's used whenever Taper is on - even with equal start/end widths - so
+  // the Drift control still has something to act on.
+  const tapered = c.width2 != null;
+  const drift = c.drift != null ? c.drift : 1;
+
   let defs = "";
-  let antsBody = "";
-  let body = "";
-  for (const c of curves) {
-    const selected = includeSelection && isCurveSelected(c.id);
-    const w0 = c.width;
-    const w1 = c.width2 != null ? c.width2 : c.width;
-    // The ribbon path is what carries the "drift" bulge (see
-    // offsetBezierRail), so it's used whenever Taper is on - even with equal
-    // start/end widths - so the Drift control still has something to act on.
-    const tapered = c.width2 != null;
-    const drift = c.drift != null ? c.drift : 1;
-
-    let paint;
-    if (c.colorMode === "gradient" && c.stops) {
-      const gid = curveGradientId(c.id);
-      const b = curveBox(c);
-      defs += `<linearGradient id="${gid}" ${gradientAttrs(c.gradientAngle || 0, b.x, b.y, b.w, b.h)}>` +
-        c.stops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
-        `</linearGradient>`;
-      paint = `url(#${gid})`;
-    } else {
-      paint = c.color;
-    }
-
-    const op = curveOpacityInfo(c);
-    defs += op.defs;
-    let curveBody = "";
-
-    if (tapered) {
-      const ribbon = taperedRibbonPath(c, w0, w1, drift);
-      curveBody += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
-      for (const cap of [ribbon.capStart, ribbon.capEnd]) {
-        if (!cap) continue;
-        curveBody += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></circle>`;
-      }
-    } else {
-      const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
-      curveBody += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
-    }
-    if (selected) {
-      // Outline of the stroked shape: a uniform-width ribbon for plain curves.
-      const ribbon = tapered ? taperedRibbonPath(c, w0, w1, drift) : taperedRibbonPath(c, w0, w0, 1);
-      let ants = `<path d="${ribbon.d}"></path>`;
-      for (const cap of [ribbon.capStart, ribbon.capEnd]) {
-        if (cap) ants += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}"></circle>`;
-      }
-      antsBody += ants;
-    }
-    body += op.attr ? `<g${op.attr}>${curveBody}</g>` : curveBody;
+  let paint;
+  if (c.colorMode === "gradient" && c.stops) {
+    const gid = curveGradientId(c.id);
+    const b = curveBox(c);
+    defs += `<linearGradient id="${gid}" ${gradientAttrs(c.gradientAngle || 0, b.x, b.y, b.w, b.h)}>` +
+      c.stops.map(t => `<stop offset="${fmt(t.o * 100)}%" stop-color="${t.color}"/>`).join("") +
+      `</linearGradient>`;
+    paint = `url(#${gid})`;
+  } else {
+    paint = c.color;
   }
-  return { defs, body: antsBody ? body + `<g class="ants ants-base">${antsBody}</g><g class="ants ants-dash">${antsBody}</g>` : body };
+
+  const op = curveOpacityInfo(c);
+  defs += op.defs;
+  let curveBody = "";
+
+  if (tapered) {
+    const ribbon = taperedRibbonPath(c, w0, w1, drift);
+    curveBody += `<path d="${ribbon.d}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></path>`;
+    for (const cap of [ribbon.capStart, ribbon.capEnd]) {
+      if (!cap) continue;
+      curveBody += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}" fill="${paint}" data-curve-id="${escapeAttr(c.id)}"></circle>`;
+    }
+  } else {
+    const d = `M ${fmt(c.p0.x)} ${fmt(c.p0.y)} C ${fmt(c.c1.x)} ${fmt(c.c1.y)}, ${fmt(c.c2.x)} ${fmt(c.c2.y)}, ${fmt(c.p3.x)} ${fmt(c.p3.y)}`;
+    curveBody += `<path d="${d}" fill="none" stroke="${paint}" stroke-width="${w0}" stroke-linecap="round" data-curve-id="${escapeAttr(c.id)}"></path>`;
+  }
+
+  let ants = "";
+  if (selected) {
+    // Outline of the stroked shape: a uniform-width ribbon for plain curves.
+    const ribbon = tapered ? taperedRibbonPath(c, w0, w1, drift) : taperedRibbonPath(c, w0, w0, 1);
+    ants = `<path d="${ribbon.d}"></path>`;
+    for (const cap of [ribbon.capStart, ribbon.capEnd]) {
+      if (cap) ants += `<circle cx="${fmt(cap.x)}" cy="${fmt(cap.y)}" r="${fmt(cap.r)}"></circle>`;
+    }
+  }
+  return { defs, body: op.attr ? `<g${op.attr}>${curveBody}</g>` : curveBody, ants };
+}
+
+// A list of curves on their own, used where the shared stack does not apply
+// (the Symbol tool's live preview). The canvas and the export use artMarkup.
+function curvesMarkup(curves, includeSelection = true) {
+  let defs = "", antsBody = "", body = "";
+  for (const c of curves) {
+    const chunk = curveChunk(c, includeSelection && isCurveSelected(c.id));
+    defs += chunk.defs;
+    body += chunk.body;
+    antsBody += chunk.ants;
+  }
+  return { defs, body: antsBody ? body + antsGroups(antsBody) : body };
 }
 
 function currentScale() {
@@ -1133,9 +1553,9 @@ function renderCanvas() {
   if (!gridLayer) ensureLayers();
   renderGrid();
 
-  const curveA = curvesMarkup(state.curves);
-  defsLayer.innerHTML = curveA.defs;
-  curvesLayer.innerHTML = curveA.body;
+  const art = artMarkup();
+  defsLayer.innerHTML = art.defs;
+  artLayer.innerHTML = art.body;
 
   renderHandles();
 }
@@ -1283,6 +1703,10 @@ function renderPanel() {
     return;
   }
   if (state.tool === "symbol") { renderSymbolToolPanel(); return; }
+  if (state.tool === "fill" && (!state.selection || state.selection.type !== "fill")) {
+    panel.innerHTML = `<div class="panel-empty">Click inside an area enclosed by curves to fill it.<br>An open boundary is refused: with the Curve tool, snap the ends together (or draw the missing edge), then click again.</div>`;
+    return;
+  }
   if (!state.selection) {
     panel.innerHTML = `<div class="panel-empty">Nothing selected.<br>Click an existing curve to select it, or click anywhere empty to draw one.</div>`;
     return;
@@ -1291,6 +1715,8 @@ function renderPanel() {
     renderCurvePanel();
   } else if (state.selection.type === "instance") {
     renderInstancePanel();
+  } else if (state.selection.type === "fill") {
+    renderFillPanel();
   } else {
     renderMultiCurvePanel();
   }
@@ -1435,42 +1861,64 @@ function deleteSelectedInstance() {
   pushHistory();
 }
 
+function deleteSelectedFill() {
+  const id = state.selection.id;
+  state.fills = state.fills.filter(f => f.id !== id);
+  state.selection = null;
+  render();
+  pushHistory();
+}
+
+// Turns the selected curves into a fill. The boundary must be a single closed
+// loop - ends meeting (snapped to an anchor, or close enough to count as
+// joined) with no dangling or branching curves.
+function fillSelection(curves) {
+  const edges = loopFromCurves(new Set(curves.map(c => c.id)));
+  if (!edges) {
+    showHint("Those curves don't form a single closed loop: ends must meet, with no loose or branching curves.");
+    return;
+  }
+  const existing = state.fills.find(f => sameLoop(f.edges, edges));
+  const fill = existing || newFill(edges);
+  if (!existing) pushHistory();
+  setSelection({ type: "fill", id: fill.id });
+}
+
 // Multiple curves selected via Shift-click: kept deliberately limited to
 // move (via drag, handled in the pointer handlers) and delete - editing
 // per-curve properties (color, width, ...) for a mixed group has no single
 // obvious value to show, so that's left to single-curve selection for now.
-// Moves the selected curve(s) within state.curves, which doubles as their
-// paint order (see curvesMarkup) - later entries draw on top. "forward" and
-// "backward" swap each selected curve past its one non-selected neighbor on
-// that side, processing from the topmost/bottommost index inward so a
-// contiguous selection moves as a single block instead of interleaving.
+// Moves whatever is selected through the shared paint order (state.order), so
+// one command handles a curve, a group of curves, an instance's curves, or a
+// fill - and a fill can be lifted past the strokes it overlaps. "forward" and
+// "backward" swap each selected key past its one unselected neighbour on that
+// side, processing from the top/bottom inward so a contiguous block moves as a
+// unit instead of interleaving.
 function reorderSelection(direction) {
   if (!state.selection) return;
-  const ids = state.selection.type === "curve" ? [state.selection.id]
-    : state.selection.type === "curves" ? state.selection.ids
-    : state.selection.type === "instance" ? instanceCurveIds(state.selection.id)
-    : null;
-  if (!ids || !ids.length) return;
-  const idSet = new Set(ids);
-  const curves = state.curves;
+  const keys = selectedKeys();
+  if (!keys.length) return;
+  const keySet = new Set(keys);
+  const order = state.order;
 
   if (direction === "front" || direction === "back") {
-    const selected = curves.filter(c => idSet.has(c.id));
-    const rest = curves.filter(c => !idSet.has(c.id));
-    state.curves = direction === "front" ? rest.concat(selected) : selected.concat(rest);
+    const selected = order.filter(k => keySet.has(k));
+    const rest = order.filter(k => !keySet.has(k));
+    state.order = direction === "front" ? rest.concat(selected) : selected.concat(rest);
   } else if (direction === "forward") {
-    for (let i = curves.length - 2; i >= 0; i--) {
-      if (idSet.has(curves[i].id) && !idSet.has(curves[i + 1].id)) {
-        [curves[i], curves[i + 1]] = [curves[i + 1], curves[i]];
+    for (let i = order.length - 2; i >= 0; i--) {
+      if (keySet.has(order[i]) && !keySet.has(order[i + 1])) {
+        [order[i], order[i + 1]] = [order[i + 1], order[i]];
       }
     }
   } else if (direction === "backward") {
-    for (let i = 1; i < curves.length; i++) {
-      if (idSet.has(curves[i].id) && !idSet.has(curves[i - 1].id)) {
-        [curves[i - 1], curves[i]] = [curves[i], curves[i - 1]];
+    for (let i = 1; i < order.length; i++) {
+      if (keySet.has(order[i]) && !keySet.has(order[i - 1])) {
+        [order[i - 1], order[i]] = [order[i], order[i - 1]];
       }
     }
   }
+  sortRegistriesByOrder();
   renderCanvas();
   pushHistory();
 }
@@ -1484,6 +1932,7 @@ function renderMultiCurvePanel() {
     <div class="panel-empty">${count} curves selected.<br>Drag to move them together, or press Delete to remove them.</div>
     <div class="panel-section">
       <div class="action-row">${makeSymbolButtonHtml("f-make-symbol-multi")}</div>
+      <div class="action-row"><button class="icon-btn" id="f-fill-multi" title="Fill selection: use these curves as the boundary of a filled area. They must form one closed loop, with ends meeting and nothing branching off.">&#9635; Fill selection</button></div>
       <div class="action-row">
         <button class="icon-btn" id="f-to-front-multi" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
         <button class="icon-btn" id="f-forward-multi" title="Bring forward (])">${ICON_FORWARD}</button>
@@ -1500,6 +1949,7 @@ function renderMultiCurvePanel() {
     </div>
   `;
   wireMakeSymbolButton("f-make-symbol-multi", selCurves);
+  document.getElementById("f-fill-multi").addEventListener("click", () => fillSelection(selCurves));
   document.getElementById("f-no-export-multi").addEventListener("change", e => {
     for (const cv of selCurves) { if (e.target.checked) cv.noExport = true; else delete cv.noExport; }
     pushHistory();
@@ -1515,6 +1965,199 @@ function renderMultiCurvePanel() {
     state.selection = null;
     render();
     pushHistory();
+  });
+}
+
+// Panel for one fill. Its color and opacity sections mirror the curve panel's
+// (same palette swatches, same stop tables, same range/number pairs) so the two
+// read as the same controls; the boundary list is read-only apart from jumping
+// to the curves that enclose the area.
+function renderFillPanel() {
+  const f = state.fills.find(x => x.id === state.selection.id);
+  if (!f) { state.selection = null; renderPanel(); return; }
+  const isGrad = f.colorMode === "gradient";
+  const isOpGrad = f.opacityMode === "gradient";
+  const pct = v => Math.round((v != null ? v : 1) * 100);
+  panel.innerHTML = `
+    <div class="panel-section">
+      <h3>Fill</h3>
+      <div class="seg">
+        <button id="fl-solid" class="${!isGrad ? "active" : ""}">Solid</button>
+        <button id="fl-grad" class="${isGrad ? "active" : ""}">Gradient</button>
+      </div>
+      <div id="fl-color-fields"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Opacity</h3>
+      <div class="seg">
+        <button id="fl-op-flat" class="${!isOpGrad ? "active" : ""}">Flat</button>
+        <button id="fl-op-grad" class="${isOpGrad ? "active" : ""}">Gradient</button>
+      </div>
+      <div id="fl-opacity-fields"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Boundary</h3>
+      <div class="panel-empty">${f.edges.length} curve${f.edges.length === 1 ? "" : "s"} enclose this area.<br>Reshaping any of them reshapes the fill.</div>
+      <div class="tbl">
+        <div class="tbl-row tbl-head"><span>#</span><span>Curve</span><span>Direction</span></div>
+        ${f.edges.map((e, i) => `<div class="tbl-row"><span>${i + 1}</span><span>${escapeAttr(e.curve)}</span><span>${e.rev ? "reversed" : "forward"}</span></div>`).join("")}
+      </div>
+      <div class="action-row"><button class="icon-btn" id="fl-boundary" title="Select the curves that enclose this fill, with the Curve tool, so they can be reshaped together.">Select boundary curves</button></div>
+    </div>
+    <div class="panel-section">
+      <h3>Actions</h3>
+      <div class="action-row">
+        <button class="icon-btn" id="fl-to-front" title="Bring to front (Shift+])">${ICON_TO_FRONT}</button>
+        <button class="icon-btn" id="fl-forward" title="Bring forward (])">${ICON_FORWARD}</button>
+        <button class="icon-btn" id="fl-backward" title="Send backward ([)">${ICON_BACKWARD}</button>
+        <button class="icon-btn" id="fl-to-back" title="Send to back (Shift+[)">${ICON_TO_BACK}</button>
+      </div>
+      <div class="action-row">
+        <button class="icon-btn danger" id="fl-delete" title="Delete this fill; the curves that enclose it are left alone.">${ICON_TRASH}</button>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h3>Misc</h3>
+      <div class="field-row"><label title="Leave this fill out of the exported SVG">Exclude from SVG</label><input type="checkbox" id="fl-no-export" ${f.noExport ? "checked" : ""}></div>
+    </div>
+  `;
+
+  document.getElementById("fl-boundary").addEventListener("click", () => {
+    const ids = [...new Set(f.edges.map(e => e.curve))];
+    setTool("curve");
+    setSelection(ids.length === 1 ? { type: "curve", id: ids[0] } : { type: "curves", ids });
+  });
+  document.getElementById("fl-delete").addEventListener("click", deleteSelectedFill);
+  document.getElementById("fl-to-front").addEventListener("click", () => reorderSelection("front"));
+  document.getElementById("fl-forward").addEventListener("click", () => reorderSelection("forward"));
+  document.getElementById("fl-backward").addEventListener("click", () => reorderSelection("backward"));
+  document.getElementById("fl-to-back").addEventListener("click", () => reorderSelection("back"));
+  document.getElementById("fl-no-export").addEventListener("change", e => {
+    if (e.target.checked) f.noExport = true; else delete f.noExport;
+    pushHistory();
+  });
+
+  // Range + number pair driving one angle: 'input' repaints live, 'change'
+  // commits history (same contract as the curve panel's angle controls).
+  function mountAngle(rangeId, numId, prop, onChange) {
+    const range = document.getElementById(rangeId), num = document.getElementById(numId);
+    const set = v => { f[prop] = v; range.value = v; num.value = v; onChange(); renderCanvas(); };
+    range.addEventListener("input", e => set(parseInt(e.target.value, 10)));
+    range.addEventListener("change", () => pushHistory());
+    num.addEventListener("input", e => {
+      const v = parseInt(e.target.value, 10);
+      if (Number.isFinite(v)) set(v);
+    });
+    num.addEventListener("change", e => {
+      set(Math.max(0, Math.min(359, parseInt(e.target.value, 10) || 0)));
+      pushHistory();
+    });
+  }
+
+  const colorFields = document.getElementById("fl-color-fields");
+  function paintSolidFields() {
+    colorFields.innerHTML = "";
+    mountColorField(colorFields, "Color", f.color, v => {
+      f.color = v;
+      renderCanvas(); pushHistory();
+    });
+  }
+  function paintGradientFields() {
+    const angle = f.gradientAngle || 0;
+    colorFields.innerHTML = `
+      <div class="gradient-preview" id="fl-gpreview"></div>
+      <div id="fl-stops"></div>
+      <div class="field-row">
+        <label>Angle</label>
+        <input type="range" id="fl-gangle" min="0" max="359" step="1" value="${angle}">
+        <input type="number" class="num-in" id="fl-gangle-num" min="0" max="359" step="1" value="${angle}">
+        <span class="unit">&deg;</span>
+      </div>
+    `;
+    const preview = () => {
+      document.getElementById("fl-gpreview").style.background =
+        `linear-gradient(${cssGradientAngle(f.gradientAngle || 0)}deg, ${stopsCss(f.stops)})`;
+    };
+    preview();
+    mountStopTable(document.getElementById("fl-stops"), f.stops, false, () => { preview(); renderCanvas(); });
+    mountAngle("fl-gangle", "fl-gangle-num", "gradientAngle", preview);
+  }
+  if (isGrad) paintGradientFields(); else paintSolidFields();
+
+  document.getElementById("fl-solid").addEventListener("click", () => {
+    if (f.colorMode !== "gradient") return;
+    f.colorMode = "solid";
+    renderFillPanel(); renderCanvas(); pushHistory();
+  });
+  document.getElementById("fl-grad").addEventListener("click", () => {
+    if (f.colorMode === "gradient") return;
+    f.colorMode = "gradient";
+    f.stops = f.stops || [{ o: 0, color: f.color }, { o: 1, color: "#5b8cff" }];
+    f.gradientAngle = f.gradientAngle != null ? f.gradientAngle : 90;
+    renderFillPanel(); renderCanvas(); pushHistory();
+  });
+
+  const opacityFields = document.getElementById("fl-opacity-fields");
+  function paintOpacityFields() {
+    if (!isOpGrad) {
+      opacityFields.innerHTML = `
+        <div class="field-row">
+          <label>Opacity</label>
+          <input type="range" id="fl-op" min="0" max="100" step="1" value="${pct(f.opacity)}">
+          <input type="number" class="num-in" id="fl-op-num" min="0" max="100" step="1" value="${pct(f.opacity)}">
+          <span class="unit">%</span>
+        </div>`;
+      const range = document.getElementById("fl-op"), num = document.getElementById("fl-op-num");
+      const apply = v => { f.opacity = v / 100; renderCanvas(); };
+      range.addEventListener("input", e => {
+        const v = parseInt(e.target.value, 10);
+        num.value = v; apply(v);
+      });
+      range.addEventListener("change", () => pushHistory());
+      num.addEventListener("input", e => {
+        const v = parseInt(e.target.value, 10);
+        if (!Number.isFinite(v)) return;
+        range.value = v; apply(Math.max(0, Math.min(100, v)));
+      });
+      num.addEventListener("change", e => {
+        const v = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+        e.target.value = v; range.value = v; apply(v);
+        pushHistory();
+      });
+      return;
+    }
+    const angle = f.opacityAngle || 0;
+    opacityFields.innerHTML = `
+      <div class="gradient-preview opacity-preview"><div id="fl-oppreview"></div></div>
+      <div id="fl-ostops"></div>
+      <div class="field-row">
+        <label>Angle</label>
+        <input type="range" id="fl-opangle" min="0" max="359" step="1" value="${angle}">
+        <input type="number" class="num-in" id="fl-opangle-num" min="0" max="359" step="1" value="${angle}">
+        <span class="unit">&deg;</span>
+      </div>
+    `;
+    const preview = () => {
+      document.getElementById("fl-oppreview").style.background =
+        `linear-gradient(${cssGradientAngle(f.opacityAngle || 0)}deg, ${stopsCss(f.opacityStops, true)})`;
+    };
+    preview();
+    mountStopTable(document.getElementById("fl-ostops"), f.opacityStops, true, () => { preview(); renderCanvas(); });
+    mountAngle("fl-opangle", "fl-opangle-num", "opacityAngle", preview);
+  }
+  paintOpacityFields();
+
+  document.getElementById("fl-op-flat").addEventListener("click", () => {
+    if (!isOpGrad) return;
+    f.opacityMode = "flat";
+    renderFillPanel(); renderCanvas(); pushHistory();
+  });
+  document.getElementById("fl-op-grad").addEventListener("click", () => {
+    if (isOpGrad) return;
+    f.opacityMode = "gradient";
+    f.opacityStops = f.opacityStops || [{ o: 0, a: f.opacity != null ? f.opacity : 1 }, { o: 1, a: 0 }];
+    f.opacityAngle = f.opacityAngle != null ? f.opacityAngle : 90;
+    renderFillPanel(); renderCanvas(); pushHistory();
   });
 }
 
@@ -2402,6 +3045,7 @@ function onStageMouseDown(evt) {
 
   if (state.tool === "circle") { onCircleMouseDown(evt); return; }
   if (state.tool === "symbol") { onSymbolMouseDown(evt); return; }
+  if (state.tool === "fill") { onFillMouseDown(evt); return; }
   if (state.tool !== "curve") return;
   if (handleDoubleClick(evt)) return;
 
@@ -2532,9 +3176,44 @@ function symbolPreviewMarkup(evt) {
   return `<defs>${m.defs}</defs><g opacity="0.55">${m.body}</g>` + dot(symbolPending, "#2ecc71", 1) + dot(p, "#e6453c", 0.6);
 }
 
+// The Fill tool fills the face under the cursor outright: the boundary is
+// discovered from the curves that are already there, so nothing is selected
+// first. An open chain simply has no bounded face, so the click is refused
+// rather than the tool inventing a closing edge.
+function onFillMouseDown(evt) {
+  const edges = faceAt(toSvgPoint(evt));
+  if (!edges) {
+    showHint("No enclosed area here. Ends must meet: snap them to an anchor (or bring them within a couple of pixels), then click inside again.");
+    return;
+  }
+  // Clicking an area that is already filled picks that fill up for editing
+  // instead of stacking an identical copy on top of it.
+  const existing = state.fills.find(f => sameLoop(f.edges, edges));
+  const fill = existing || newFill(edges);
+  previewLayer.innerHTML = "";
+  if (!existing) pushHistory();
+  setSelection({ type: "fill", id: fill.id });
+}
+
+// Wash + dashed outline under the cursor, so it is obvious which face a click
+// is about to take.
+function fillPreviewMarkup(pt) {
+  const edges = faceAt(pt);
+  if (!edges) return "";
+  const d = fillPathData({ edges });
+  const s = currentScale();
+  return `<path d="${d}" fill="#5b8cff" fill-opacity="0.25"></path>` +
+    `<path d="${d}" fill="none" stroke="#5b8cff" stroke-width="${1.6 / s}" stroke-dasharray="${4 / s},${3 / s}"></path>`;
+}
+
 function redrawDuringDrag() {
   renderHandles();
-  curvesLayer.innerHTML = curvesMarkup(state.curves).body;
+  // Fills are derived from the curves, so the whole stack is repainted: a
+  // boundary curve's move reshapes its fill, and gradient and mask boxes move
+  // with it.
+  const art = artMarkup();
+  defsLayer.innerHTML = art.defs;
+  artLayer.innerHTML = art.body;
 }
 
 function snapRingMarkup(snap) {
@@ -2705,6 +3384,11 @@ function onStageMouseMove(evt) {
     previewLayer.innerHTML = symbolPreviewMarkup(evt);
     return;
   }
+  if (state.tool === "fill") {
+    svg.style.cursor = "crosshair";
+    previewLayer.innerHTML = fillPreviewMarkup(toSvgPoint(evt));
+    return;
+  }
   if (state.tool === "curve" && !dragCtx) {
     const s = currentScale();
     const rA = 7 / s, lw = 1 / s;
@@ -2763,6 +3447,7 @@ function setTool(tool) {
   document.getElementById("tool-curve").classList.toggle("active", tool === "curve");
   document.getElementById("tool-circle").classList.toggle("active", tool === "circle");
   document.getElementById("tool-symbol").classList.toggle("active", tool === "symbol");
+  document.getElementById("tool-fill").classList.toggle("active", tool === "fill");
   svg.style.cursor = "default";
   if (tool === "curve") {
     showHint("Click a curve to select it, or click empty canvas (or an anchor) to start a new one.", true);
@@ -2770,6 +3455,8 @@ function setTool(tool) {
     showHint("Drag from the center to the edge to draw a circle (four quarter-arc curves).", true);
   } else if (tool === "symbol") {
     showHint("Click a start point, then an end point, to place the symbol between them.", true);
+  } else if (tool === "fill") {
+    showHint("Click inside an area enclosed by curves to fill it. An open boundary is refused.", true);
   }
   render();
 }
@@ -2780,6 +3467,7 @@ document.getElementById("tool-palette").addEventListener("click", () => setTool(
 document.getElementById("tool-curve").addEventListener("click", () => setTool("curve"));
 document.getElementById("tool-circle").addEventListener("click", () => setTool("circle"));
 document.getElementById("tool-symbol").addEventListener("click", () => setTool("symbol"));
+document.getElementById("tool-fill").addEventListener("click", () => setTool("fill"));
 
 document.addEventListener("keydown", evt => {
   if (evt.key === "Escape") {
@@ -2790,6 +3478,9 @@ document.addEventListener("keydown", evt => {
   } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection && state.selection.type === "instance") {
     if (isTyping(evt)) return;
     deleteSelectedInstance();
+  } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection && state.selection.type === "fill") {
+    if (isTyping(evt)) return;
+    deleteSelectedFill();
   } else if ((evt.key === "Delete" || evt.key === "Backspace") && state.selection &&
       (state.selection.type === "curve" || state.selection.type === "curves")) {
     if (document.activeElement && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
@@ -2799,10 +3490,10 @@ document.addEventListener("keydown", evt => {
     state.selection = null;
     render(); pushHistory();
   } else if ((evt.key === "]" || evt.key === "}") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
-      state.selection && ["curve", "curves", "instance"].includes(state.selection.type)) {
+      state.selection && ["curve", "curves", "instance", "fill"].includes(state.selection.type)) {
     reorderSelection(evt.shiftKey || evt.key === "}" ? "front" : "forward");
   } else if ((evt.key === "[" || evt.key === "{") && !evt.ctrlKey && !evt.metaKey && !isTyping(evt) &&
-      state.selection && ["curve", "curves", "instance"].includes(state.selection.type)) {
+      state.selection && ["curve", "curves", "instance", "fill"].includes(state.selection.type)) {
     reorderSelection(evt.shiftKey || evt.key === "{" ? "back" : "backward");
   } else if (evt.key.toLowerCase() === "c" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("curve");
@@ -2816,6 +3507,8 @@ document.addEventListener("keydown", evt => {
     setTool("grid");
   } else if (evt.key.toLowerCase() === "l" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
     setTool("palette");
+  } else if (evt.key.toLowerCase() === "f" && !evt.ctrlKey && !evt.metaKey && !isTyping(evt)) {
+    setTool("fill");
   } else if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") {
     evt.preventDefault();
     if (evt.shiftKey) redo(); else undo();
@@ -3048,12 +3741,14 @@ async function initServerStorage() {
 
 function buildExportSVG() {
   const { width: W, height: H } = state.grid;
-  const curveA = curvesMarkup(state.curves.filter(c => !c.noExport), false);
-  const curves = curveA.body;
+  // forExport drops the drawables marked Exclude from SVG and leaves out the
+  // selection marchers. Curves and fills keep the same relative order as on
+  // the canvas, in one group.
+  const art = artMarkup({ forExport: true });
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="${SVGNS}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n` +
-    `<defs>${curveA.defs}</defs>\n` +
-    `<g id="curves">${curves}</g>\n` +
+    `<defs>${art.defs}</defs>\n` +
+    `<g id="art">${art.body}</g>\n` +
     `</svg>\n`;
 }
 
